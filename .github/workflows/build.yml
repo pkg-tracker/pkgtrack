@@ -1,7 +1,7 @@
 # Builds and tests every push and pull request.
 # On a push to main, if the version in Cargo.toml has no release yet,
 # it tags v<version> and publishes a GitHub release with the .deb, the
-# AppImage and a plain binary tarball. Running apps then show the
+# .rpm, the AppImage and a plain binary tarball. Running apps then show the
 # "new version available" popup.
 name: Build
 
@@ -60,6 +60,12 @@ jobs:
 
       - name: Build .deb
         run: ./packaging/build-deb.sh
+
+      - name: Build .rpm
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm
+          ./packaging/build-rpm.sh
 
       - name: Build AppImage
         env:

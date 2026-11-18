@@ -22,6 +22,7 @@ A fast, native Linux desktop app (Rust + [iced](https://iced.rs)) that shows eve
 Get the latest version from the [Releases page](https://github.com/pkg-tracker/pkgtrack/releases/latest):
 
 - **`.deb`** (Debian, Ubuntu, Mint, Pop!_OS): `sudo apt install ./pkgtrack_*_amd64.deb`
+- **`.rpm`** (Fedora, RHEL, openSUSE): `sudo dnf install ./pkgtrack-*.x86_64.rpm` (openSUSE: `sudo zypper install ./pkgtrack-*.x86_64.rpm`)
 - **AppImage** (any distro): `chmod +x Package_Tracker-x86_64.AppImage && ./Package_Tracker-x86_64.AppImage`
 - **Tarball** (any distro, no root): unpack, then run `./install.sh` to add it to your app menu
 
@@ -51,6 +52,7 @@ cargo build --release
 ./target/release/pkgtrack --debug net|startup|sources|history|export|update-all
 ./install.sh                         # add to your app menu (~/.local, no root)
 ./packaging/build-deb.sh             # dist/pkgtrack_<version>_<arch>.deb
+./packaging/build-rpm.sh             # dist/pkgtrack-<version>-1.<arch>.rpm (needs rpmbuild)
 ./packaging/build-appimage.sh        # dist/Package_Tracker-<arch>.AppImage (downloads appimagetool)
 ./install.sh --uninstall
 ```
@@ -68,7 +70,7 @@ GitHub Actions builds and tests every push and pull request ([.github/workflows/
 1. Bump `version` in `Cargo.toml` (for example `0.1.0` → `0.2.0`) and run `cargo build` so `Cargo.lock` updates.
 2. Commit and push to `main`.
 
-If no `v<version>` tag exists yet, the workflow tags the commit and publishes a release with the `.deb`, the AppImage, a tarball and `SHA256SUMS`. Pushes that don't change the version are built and tested, but not released.
+If no `v<version>` tag exists yet, the workflow tags the commit and publishes a release with the `.deb`, the `.rpm`, the AppImage, a tarball and `SHA256SUMS`. Pushes that don't change the version are built and tested, but not released.
 
 ## License
 
