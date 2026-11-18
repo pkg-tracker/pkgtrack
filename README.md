@@ -19,7 +19,7 @@ A fast, native Linux desktop app (Rust + [iced](https://iced.rs)) that shows eve
 
 ## Download
 
-Get the latest version from the [Releases page](https://github.com/package-tracker/pkgtrack/releases/latest):
+Get the latest version from the [Releases page](https://github.com/pkg-tracker/pkgtrack/releases/latest):
 
 - **`.deb`** (Debian, Ubuntu, Mint, Pop!_OS): `sudo apt install ./pkgtrack_*_amd64.deb`
 - **AppImage** (any distro): `chmod +x Package_Tracker-x86_64.AppImage && ./Package_Tracker-x86_64.AppImage`
