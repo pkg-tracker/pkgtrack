@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Package Tracker
+GenericName=Package Manager
+Comment=See, update, install and remove packages and check them for telemetry
+Exec=pkgtrack
+Icon=io.github.pkgtrack
+Terminal=false
+Categories=System;PackageManager;Settings;
+Keywords=package;uninstall;apt;flatpak;snap;dnf;pacman;telemetry;privacy;
+StartupWMClass=io.github.pkgtrack

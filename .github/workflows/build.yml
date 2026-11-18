@@ -1,0 +1,107 @@
+# Builds and tests every push and pull request.
+# On a push to main, if the version in Cargo.toml has no release yet,
+# it tags v<version> and publishes a GitHub release with the .deb, the
+# AppImage and a plain binary tarball. Running apps then show the
+# "new version available" popup.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # The oldest supported runner gives the widest glibc compatibility.
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      released: ${{ steps.version.outputs.released }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Version $v"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Clippy
+        run: cargo clippy --release --locked
+
+      - name: Build .deb
+        run: ./packaging/build-deb.sh
+
+      - name: Build AppImage
+        env:
+          # Runners have no FUSE; let appimagetool unpack itself instead.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: ./packaging/build-appimage.sh
+
+      - name: Binary tarball
+        run: |
+          v=${{ steps.version.outputs.version }}
+          d=pkgtrack-$v-x86_64-linux
+          mkdir -p "$d"
+          cp target/release/pkgtrack install.sh README.md LICENSE "$d"/
+          mkdir -p "$d/target/release" && mv "$d/pkgtrack" "$d/target/release/"
+          cp -r assets "$d"/
+          tar czf "dist/$d.tar.gz" "$d"
+          cd dist && sha256sum * > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkgtrack-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.build.outputs.released == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pkgtrack-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Publish release v${{ needs.build.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ needs.build.outputs.version }}" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Package Tracker ${{ needs.build.outputs.version }}" \
+            --generate-notes

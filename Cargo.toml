@@ -1,0 +1,23 @@
+[package]
+name = "pkgtrack"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "See, update, install and remove Linux packages and check them for telemetry"
+license = "MIT"
+repository = "https://github.com/package-tracker/pkgtrack"
+readme = "README.md"
+keywords = ["linux", "package-manager", "apt", "flatpak", "privacy"]
+categories = ["gui", "os::linux-apis"]
+
+[dependencies]
+anyhow = "1"
+iced = { version = "0.13.1", features = ["tokio", "advanced", "image", "svg", "canvas"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "process"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
