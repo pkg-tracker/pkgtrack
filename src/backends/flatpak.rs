@@ -4,10 +4,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 // Package.extra = "<installation>\t<ref>"
-fn installation(pkg: &Package) -> &str {
+pub(crate) fn installation(pkg: &Package) -> &str {
     pkg.extra.split('\t').next().unwrap_or("system")
 }
-fn pkg_ref(pkg: &Package) -> &str {
+pub(crate) fn pkg_ref(pkg: &Package) -> &str {
     pkg.extra.split('\t').nth(1).unwrap_or(&pkg.id)
 }
 

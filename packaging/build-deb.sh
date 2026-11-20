@@ -15,6 +15,7 @@ install -Dm644 assets/pkgtrack.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/
 for s in 32 48 64 128 256 512; do
   install -Dm644 assets/pkgtrack-$s.png "$ROOT/usr/share/icons/hicolor/${s}x${s}/apps/$ID.png"
 done
+install -Dm644 assets/$ID.metainfo.xml "$ROOT/usr/share/metainfo/$ID.metainfo.xml"
 install -Dm644 README.md "$ROOT/usr/share/doc/pkgtrack/README.md"
 SIZE=$(du -sk "$ROOT/usr" | cut -f1)
 mkdir -p "$ROOT/DEBIAN"
