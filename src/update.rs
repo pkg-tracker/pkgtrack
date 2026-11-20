@@ -58,6 +58,24 @@ pub fn set_enabled(on: bool) -> Result<()> {
     }
 }
 
+/// Bump when the first-launch disclaimer changes meaningfully, to show it again.
+const DISCLAIMER_VERSION: &str = "1";
+
+fn disclaimer_file() -> PathBuf {
+    config_dir().join("accepted-disclaimer")
+}
+
+/// Has the user confirmed the first-launch "use at your own risk" notice?
+pub fn disclaimer_accepted() -> bool {
+    std::fs::read_to_string(disclaimer_file()).is_ok_and(|s| s.trim() == DISCLAIMER_VERSION)
+}
+
+pub fn accept_disclaimer() -> Result<()> {
+    std::fs::create_dir_all(config_dir())?;
+    std::fs::write(disclaimer_file(), DISCLAIMER_VERSION)?;
+    Ok(())
+}
+
 pub fn skip(version: &str) -> Result<()> {
     std::fs::create_dir_all(config_dir())?;
     std::fs::write(skip_file(), version)?;
