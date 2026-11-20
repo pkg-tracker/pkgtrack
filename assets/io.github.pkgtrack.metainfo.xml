@@ -27,7 +27,6 @@
   <icon type="stock">io.github.pkgtrack</icon>
   <url type="homepage">https://github.com/pkg-tracker/pkgtrack</url>
   <url type="bugtracker">https://github.com/pkg-tracker/pkgtrack/issues</url>
-  <url type="vcs-browser">https://github.com/pkg-tracker/pkgtrack</url>
   <categories>
     <category>System</category>
     <category>PackageManager</category>
