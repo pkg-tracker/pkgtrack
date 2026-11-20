@@ -380,6 +380,81 @@ pub fn update_all_action(pkgs: &[Package]) -> Option<Action> {
     })
 }
 
+/// Single-quote a word for `sh -c`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// One action that updates only the chosen packages (one password prompt for root steps).
+pub fn update_selected_action(pkgs: &[&Package]) -> Option<Action> {
+    let pick = |s: Source| -> Vec<&Package> {
+        pkgs.iter().copied().filter(|p| p.source == s && p.new_version.is_some()).collect()
+    };
+    let ids = |v: &[&Package]| v.iter().map(|p| sh_quote(&p.id)).collect::<Vec<_>>().join(" ");
+    let mut root = Vec::new();
+    let mut steps = Vec::new();
+    let mut parts = Vec::new();
+    let mut notes = Vec::new();
+    let apt = pick(Source::Apt);
+    if !apt.is_empty() {
+        root.push(format!(
+            "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold {}",
+            ids(&apt)
+        ));
+        parts.push(format!("{} deb", apt.len()));
+    }
+    let rpm = pick(Source::Rpm);
+    if !rpm.is_empty() {
+        let cmd = if which("dnf") { "dnf upgrade -y" } else { "zypper -n update" };
+        root.push(format!("{cmd} {}", ids(&rpm)));
+        parts.push(format!("{} rpm", rpm.len()));
+    }
+    let pacman = pick(Source::Pacman);
+    if !pacman.is_empty() {
+        // Arch does not support partial upgrades.
+        root.push("pacman -Syu --noconfirm".into());
+        parts.push(format!("{} pacman", pacman.len()));
+        notes.push("Pacman can't update single packages, so the whole system is updated.");
+    }
+    let snap = pick(Source::Snap);
+    if !snap.is_empty() {
+        root.push(format!("snap refresh {}", ids(&snap)));
+        parts.push(format!("{} snap", snap.len()));
+        notes.push("Snaps that are running are updated once you close them.");
+    }
+    if !root.is_empty() {
+        let script = format!("rc=0; {}; exit $rc", root.iter().map(|c| format!("{c} || rc=1")).collect::<Vec<_>>().join("; "));
+        steps.push(ActionKind::RootScript(script));
+    }
+    let flatpak = pick(Source::Flatpak);
+    if !flatpak.is_empty() {
+        let mut by_inst: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for p in &flatpak {
+            by_inst
+                .entry(backends::flatpak::installation(p))
+                .or_default()
+                .push(backends::flatpak::pkg_ref(p).to_string());
+        }
+        for (inst, refs) in by_inst {
+            let mut cmd: Vec<String> = ["flatpak", "update", "-y", "--noninteractive"].map(String::from).to_vec();
+            cmd.push(format!("--{inst}"));
+            cmd.extend(refs);
+            steps.push(ActionKind::User(cmd));
+        }
+        parts.push(format!("{} flatpak", flatpak.len()));
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    let n: usize = [&apt, &rpm, &pacman, &snap, &flatpak].iter().map(|v| v.len()).sum();
+    let mut confirm = format!("Update {n} selected package(s) ({})?", parts.join(", "));
+    for note in notes {
+        confirm.push(' ');
+        confirm.push_str(note);
+    }
+    Some(Action { label: "Update selected".into(), confirm: Some(confirm), kind: ActionKind::Many(steps) })
+}
+
 // ------------------------------------------------------------ scan
 
 #[derive(Debug, Clone)]
@@ -1238,5 +1313,25 @@ mod tests {
     fn versions() {
         assert!(version_tuple("3.2.8").unwrap() > version_tuple("2.10.36-3ubuntu0").unwrap());
         assert_eq!(version_tuple("1:1snap1-0ubuntu5"), None);
+    }
+
+    #[test]
+    fn update_selected_builds_one_root_script() {
+        let mut a = pkg("vlc", "VLC", Source::Apt, Kind::App, "3.0");
+        a.new_version = Some("3.1".into());
+        let mut b = pkg("it's", "Odd", Source::Apt, Kind::App, "1");
+        b.new_version = Some("2".into());
+        let mut f = pkg("org.gimp.GIMP", "GIMP", Source::Flatpak, Kind::App, "2");
+        f.new_version = Some("3".into());
+        f.extra = "user\tapp/org.gimp.GIMP/x86_64/stable".into();
+        let none = pkg("curl", "curl", Source::Apt, Kind::App, "8");
+        let act = update_selected_action(&[&a, &b, &f, &none]).unwrap();
+        assert!(act.confirm.unwrap().starts_with("Update 3 selected package(s) (2 deb, 1 flatpak)"));
+        let ActionKind::Many(steps) = act.kind else { panic!() };
+        let ActionKind::RootScript(sh) = &steps[0] else { panic!() };
+        assert!(sh.contains("--only-upgrade") && sh.contains("'vlc' 'it'\\''s'") && !sh.contains("curl"));
+        let ActionKind::User(cmd) = &steps[1] else { panic!() };
+        assert_eq!(cmd[4..], ["--user".to_string(), "app/org.gimp.GIMP/x86_64/stable".into()]);
+        assert!(update_selected_action(&[&none]).is_none());
     }
 }

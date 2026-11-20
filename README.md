@@ -13,7 +13,7 @@ A fast, native Linux desktop app (Rust + [iced](https://iced.rs)) that shows eve
 - **Startup**: login apps and system/user services with on/off switches and advice on what's safe to turn off
 - **Sources**: APT repositories and PPAs, Flatpak remotes and more; flags PPAs built for another release, unused repositories, and packages that no repository updates
 - **History**: everything installed, updated and removed (APT, pacman, Snap, DNF) with reinstall / undo / roll back, plus export and import of your app list for a new PC
-- **Update all** with one password prompt, and an optional daily update notification
+- **Update all**, or tick several packages and **update selected**, with one password prompt, plus an optional daily update notification
 - **Flatpak permission switches** (internet, files, devices, sound, Bluetooth, X11)
 - **Privacy & telemetry**: known telemetry components, crash reporters among dependencies, sandbox network access, and whether reporting services are active
 

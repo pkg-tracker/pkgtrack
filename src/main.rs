@@ -384,6 +384,11 @@ enum Message {
     CloseAppUpdate,
     SkipAppUpdate,
     ToggleAppUpdateCheck(bool),
+    /// Tick or untick a package for bulk update.
+    ToggleChecked(Key, bool),
+    /// Tick every shown package that has an update.
+    CheckAllShown,
+    ClearChecked,
 }
 
 struct App {
@@ -443,6 +448,8 @@ struct App {
     sort: Sort,
     dark: bool,
     selected: Option<Key>,
+    /// Packages ticked for "Update selected".
+    checked: HashSet<Key>,
     details: Option<Details>,
     confirm_remove: bool,
     busy: Option<String>,
@@ -518,6 +525,7 @@ impl App {
             sort: Sort::Name,
             dark: true,
             selected: None,
+            checked: HashSet::new(),
             details: None,
             confirm_remove: false,
             busy: None,
@@ -541,6 +549,14 @@ impl App {
         } else {
             Theme::CatppuccinLatte
         }
+    }
+
+    /// Ticked packages that still have an update available.
+    fn checked_pkgs(&self) -> Vec<&Package> {
+        self.packages
+            .iter()
+            .filter(|p| p.new_version.is_some() && self.checked.contains(&(p.source, p.id.clone())))
+            .collect()
     }
 
     fn selected_pkg(&self) -> Option<&Package> {
@@ -751,6 +767,23 @@ impl App {
                     self.details = Some(d);
                 }
             }
+            Message::ToggleChecked(key, on) => {
+                if on {
+                    self.checked.insert(key);
+                } else {
+                    self.checked.remove(&key);
+                }
+            }
+            Message::CheckAllShown => {
+                let keys: Vec<Key> = self
+                    .visible()
+                    .into_iter()
+                    .filter(|p| p.new_version.is_some())
+                    .map(|p| (p.source, p.id.clone()))
+                    .collect();
+                self.checked.extend(keys);
+            }
+            Message::ClearChecked => self.checked.clear(),
             Message::AskRemove => self.confirm_remove = true,
             Message::CancelRemove => self.confirm_remove = false,
             Message::ConfirmRemove | Message::Update => {
@@ -946,6 +979,7 @@ impl App {
                     Err(e) => (false, e),
                 });
                 if ok {
+                    self.checked.clear();
                     self.appimage = None;
                     self.appimage_path.clear();
                     self.popup = None;
@@ -1355,9 +1389,30 @@ impl App {
         .spacing(10)
         .align_y(Alignment::Center);
 
+        // Rows with an update get a tick box for "Update selected"; the
+        // others get an empty slot of the same width so names line up.
+        let any_updates = visible.iter().any(|p| p.new_version.is_some());
         let mut list = Column::new().spacing(2);
         for p in visible.iter().take(self.limit) {
-            list = list.push(self.pkg_row(p));
+            let item = self.pkg_row(p);
+            list = list.push(if !any_updates {
+                item
+            } else {
+                let key: Key = (p.source, p.id.clone());
+                let tick: Element<Message> = if p.new_version.is_some() {
+                    let on = self.checked.contains(&key);
+                    checkbox("", on)
+                        .on_toggle(move |b| Message::ToggleChecked(key.clone(), b))
+                        .size(18)
+                        .tip(format!("Select {} for bulk update", p.name))
+                } else {
+                    Space::with_width(18).into()
+                };
+                row![container(tick).width(Length::Fixed(26.0)).center_x(Length::Fixed(26.0)), item]
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .into()
+            });
         }
         if visible.len() > self.limit {
             list = list.push(
@@ -1378,9 +1433,42 @@ impl App {
             }
         }
 
+        let checked = self.checked_pkgs();
+        let mut info = row![muted(format!("{} shown", visible.len())).size(12)].spacing(10).align_y(Alignment::Center);
+        if any_updates {
+            let free = self.busy.is_none() && self.pending.is_none();
+            info = info.push(horizontal_space()).push(
+                button(text("Select all updates").size(12))
+                    .padding([4, 10])
+                    .style(button::secondary)
+                    .on_press(Message::CheckAllShown)
+                    .tip("Tick every package shown here that has an update"),
+            );
+            if !checked.is_empty() {
+                info = info.push(
+                    button(text("Clear").size(12))
+                        .padding([4, 10])
+                        .style(button::secondary)
+                        .on_press(Message::ClearChecked)
+                        .tip("Untick all packages"),
+                );
+            }
+            let action = advice::update_selected_action(&checked);
+            let help = action
+                .as_ref()
+                .map(|a| format!("Install updates for the ticked packages. Runs: {}", advice::describe(&a.kind)))
+                .unwrap_or_else(|| "Tick packages with the boxes on the left first".into());
+            info = info.push(
+                button(text(format!("Update selected ({})", checked.len())).size(12))
+                    .padding([4, 10])
+                    .style(button::success)
+                    .on_press_maybe(action.filter(|_| free).map(Message::RunAction))
+                    .tip(help),
+            );
+        }
         let mut col = column![
             toolbar,
-            muted(format!("{} shown", visible.len())).size(12),
+            info,
             scrollable(container(list).padding(iced::Padding { right: 14.0, ..Default::default() }))
                 .height(Length::Fill),
         ]
