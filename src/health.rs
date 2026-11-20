@@ -217,13 +217,112 @@ fn dkms_owner(module: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// First compiler error in the module's last build log.
-fn dkms_error(module: &str) -> Option<String> {
-    let log = std::fs::read_to_string(format!("/var/lib/dkms/{module}/build/make.log")).ok()?;
-    let line = log.lines().find(|l| l.contains("error:"))?;
-    // Drop the long build path, keep "file.c:123: error: …".
-    let short = line.rsplit_once('/').map(|(_, f)| f).unwrap_or(line);
-    Some(short.chars().take(200).collect())
+/// Why a DKMS build failed, judged from its make.log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BuildFailure {
+    /// The kernel changed an internal function or structure the driver uses;
+    /// only a newer driver fixes it.
+    KernelApi,
+    /// No C compiler (or make) installed.
+    NoCompiler,
+    /// The compiler is older than the one the kernel was built with and
+    /// doesn't know its options. Holds that compiler's name, e.g. "gcc-13".
+    OldCompiler(Option<String>),
+    Other,
+}
+
+/// First compiler error in a build log, shortened, and what kind of failure it is.
+fn classify_build_log(log: &str) -> (Option<String>, BuildFailure) {
+    let first = log.lines().find(|l| l.contains("error:")).map(|line| {
+        // Drop the long build path, keep "file.c:123: error: …".
+        let short = line.rsplit_once('/').map(|(_, f)| f).unwrap_or(line);
+        short.chars().take(200).collect::<String>()
+    });
+    const API: [&str; 9] = [
+        "too few arguments to function",
+        "too many arguments to function",
+        "implicit declaration of function",
+        "has no member named",
+        "incompatible pointer type",
+        "incompatible type for argument",
+        "conflicting types for",
+        "undeclared (first use",
+        "unknown type name",
+    ];
+    let kind = if log.contains("gcc: not found")
+        || log.contains("gcc: No such file or directory")
+        || log.contains("gcc: command not found")
+        || log.contains("make: not found")
+        || log.contains("make: command not found")
+    {
+        BuildFailure::NoCompiler
+    } else if log.contains("unrecognized command-line option") || log.contains("unrecognized command line option") {
+        // "  The kernel was built by: x86_64-linux-gnu-gcc-13 (Ubuntu …) 13.3.0"
+        let gcc = log
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("The kernel was built by:"))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.rsplit_once("gcc-").map(|(_, n)| n))
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            .map(|n| format!("gcc-{n}"));
+        BuildFailure::OldCompiler(gcc)
+    } else if API.iter().any(|p| log.contains(p)) {
+        BuildFailure::KernelApi
+    } else {
+        BuildFailure::Other
+    };
+    (first, kind)
+}
+
+fn dkms_build_failure(module: &str) -> (Option<String>, BuildFailure) {
+    match std::fs::read_to_string(format!("/var/lib/dkms/{module}/build/make.log")) {
+        Ok(log) => classify_build_log(&log),
+        Err(_) => (None, BuildFailure::Other),
+    }
+}
+
+/// Newer version of an installed package that the package manager can install
+/// now (from its local cache; no network). (installed, candidate)
+fn pending_upgrade(pkg: &str) -> Option<(String, String)> {
+    if which("apt-cache") {
+        let out = run("apt-cache", &["policy", pkg], &[]).ok()?;
+        let field = |name: &str| {
+            out.lines().find_map(|l| l.trim().strip_prefix(name)).map(|v| v.trim().to_string())
+        };
+        let (inst, cand) = (field("Installed:")?, field("Candidate:")?);
+        let none = |v: &str| v.is_empty() || v == "(none)";
+        (!none(&inst) && !none(&cand) && inst != cand).then_some((inst, cand))
+    } else if which("pacman") {
+        // "name old -> new"; exit 1 when up to date.
+        let out = run("pacman", &["-Qu", pkg], &[1]).ok()?;
+        let f: Vec<&str> = out.lines().next()?.split_whitespace().collect();
+        match f.as_slice() {
+            [_, old, "->", new, ..] => Some((old.to_string(), new.to_string())),
+            _ => None,
+        }
+    } else if which("dnf") {
+        let out = run("dnf", &["-q", "--cacheonly", "list", "--upgrades", pkg], &[1]).ok()?;
+        let new = out.lines().find(|l| l.starts_with(&format!("{pkg}.")))?.split_whitespace().nth(1)?.to_string();
+        Some((String::new(), new))
+    } else {
+        None
+    }
+}
+
+/// Command that upgrades just this package.
+fn upgrade_cmd(pkg: &str) -> Option<String> {
+    let q = sh_quote(pkg);
+    if which("apt-get") {
+        Some(format!("apt-get install -y --only-upgrade {q}"))
+    } else if which("pacman") {
+        Some(format!("pacman -S --noconfirm --needed {q}"))
+    } else if which("dnf") {
+        Some(format!("dnf upgrade -y {q}"))
+    } else if which("zypper") {
+        Some(format!("zypper -n update {q}"))
+    } else {
+        None
+    }
 }
 
 /// Installed kernels that can have modules built (image + headers present).
@@ -334,36 +433,125 @@ fn dkms() -> Vec<Issue> {
             }
         }
     }
-    missing
+    let mut issues: Vec<Issue> = missing
         .into_iter()
         .map(|(m, ks)| {
             let name = m.split('/').next().unwrap_or(&m).to_string();
             let owner = dkms_owner(&m);
-            let err = dkms_error(&m);
+            let (err, failure) = dkms_build_failure(&m);
+            let upgrade = owner.as_deref().and_then(|p| pending_upgrade(p).map(|v| (p.to_string(), v)));
             let urgent = ks.iter().any(|k| *k == newest || *k == running);
-            let mut detail = format!(
-                "The driver {name} couldn't be built for kernel {}. That kernel's install can't finish, and if \
-                 you start it, the hardware this driver is for won't work. The kernel you run now is not affected.",
-                ks.join(", ")
-            );
+            let running_broken = ks.contains(&running);
+            let mut detail = if running_broken {
+                format!(
+                    "The driver {name} couldn't be built for kernel {}. That kernel's install can't finish, and the \
+                     hardware this driver is for doesn't work while you run it, as you do now.",
+                    ks.join(", ")
+                )
+            } else {
+                format!(
+                    "The driver {name} couldn't be built for kernel {}. That kernel's install can't finish, and if \
+                     you start it, the hardware this driver is for won't work. The kernel you run now is not affected.",
+                    ks.join(", ")
+                )
+            };
             if let Some(e) = &err {
                 detail.push_str(&format!("\n\nBuild error: {e}"));
             }
-            detail.push_str(
-                "\n\nThis usually means the driver is older than the kernel. Update the driver from wherever you got it, \
-                 then press Try again. If you don't need it, remove it and the kernel install finishes.",
-            );
             let configure = if which("dpkg") { " && dpkg --configure -a" } else { "" };
+            let mut actions = Vec::new();
+            let mut extra_tools: Option<(String, String)> = None; // (label, install command)
+            let why = match &failure {
+                BuildFailure::KernelApi => format!(
+                    "The new kernel changed something inside it that this driver uses, so this version of the driver \
+                     can't work with it. Building it again won't help; only a newer {name} fixes it. Driver makers \
+                     usually release one within days or weeks of a kernel update."
+                ),
+                BuildFailure::NoCompiler => {
+                    extra_tools = if which("apt-get") {
+                        Some(("Install build tools".into(), "apt-get install -y build-essential".into()))
+                    } else if which("dnf") {
+                        Some(("Install build tools".into(), "dnf install -y gcc make".into()))
+                    } else if which("pacman") {
+                        Some(("Install build tools".into(), "pacman -S --noconfirm --needed base-devel".into()))
+                    } else if which("zypper") {
+                        Some(("Install build tools".into(), "zypper -n install gcc make".into()))
+                    } else {
+                        None
+                    };
+                    "Drivers are built on your computer, and the C compiler needed for that isn't installed. \
+                     Install the build tools, and the driver is built again."
+                        .into()
+                }
+                BuildFailure::OldCompiler(gcc) => {
+                    if let (Some(g), true) = (gcc, which("apt-get")) {
+                        extra_tools = Some((format!("Install {g}"), format!("apt-get install -y {}", sh_quote(g))));
+                    }
+                    match gcc {
+                        Some(g) => format!(
+                            "The kernel was built with a newer compiler ({g}) than the one this driver was built with, \
+                             which doesn't understand its settings. Install {g}, and the driver is built again."
+                        ),
+                        None => "The kernel was built with a newer compiler than the one installed. Update the \
+                                 compiler (gcc) and press Try again."
+                            .into(),
+                    }
+                }
+                BuildFailure::Other => "This usually means the driver is older than the kernel. Update the driver \
+                                        from wherever you got it, then press Try again."
+                    .into(),
+            };
+            detail.push_str(&format!("\n\n{why}"));
+            match &upgrade {
+                Some((p, (_, new))) => detail.push_str(&format!(
+                    "\n\nA newer {p} ({new}) is available. Updating to it is the most likely fix."
+                )),
+                None if failure == BuildFailure::KernelApi => detail.push_str(
+                    "\n\nNo newer version is available from your software sources yet. Check the driver's website, \
+                     or wait and look again after the next update check.",
+                ),
+                None => {}
+            }
+            // A kernel the driver works with, to use in the meantime.
+            if let Some(good) = kernels.iter().rev().find(|k| ok.contains(&(m.clone(), (*k).clone()))) {
+                let menu = if Path::new("/boot/grub/grub.cfg").exists() || Path::new("/boot/grub2/grub.cfg").exists() {
+                    " (under \u{201c}Advanced options\u{201d} in the boot menu; hold Shift or press Esc while the \
+                     computer starts if the menu doesn't show)"
+                } else {
+                    " in the boot menu"
+                };
+                detail.push_str(&format!(
+                    "\n\nUntil then, start kernel {good}{menu}; the driver works there. If you don't need the driver, \
+                     remove it and the kernel install finishes."
+                ));
+            } else {
+                detail.push_str("\n\nIf you don't need the driver, remove it and the kernel install finishes.");
+            }
             let retry = ks
                 .iter()
                 .map(|k| format!("dkms autoinstall -k {}", sh_quote(k)))
                 .collect::<Vec<_>>()
                 .join(" && ");
-            let mut actions = vec![root_script(
+            if let (Some((p, (_, new))), Some(cmd)) = (&upgrade, upgrade.as_ref().and_then(|(p, _)| upgrade_cmd(p))) {
+                actions.push(root_script(
+                    "Update driver",
+                    // The package's own install script builds it for every kernel.
+                    format!("{cmd}{configure}"),
+                    format!("Update {p} to {new}? It is then built again for kernel {}.", ks.join(", ")),
+                ));
+            }
+            if let Some((label, cmd)) = extra_tools {
+                actions.push(root_script(
+                    &label,
+                    format!("{cmd} && {retry}{configure}"),
+                    format!("Run \u{201c}{cmd}\u{201d}, then build the {name} driver again for kernel {}?", ks.join(", ")),
+                ));
+            }
+            actions.push(root_script(
                 "Try again",
                 format!("{retry}{configure}"),
                 format!("Build the {name} driver again for kernel {}?", ks.join(", ")),
-            )];
+            ));
             if let Some(pkg) = owner.as_ref() {
                 // What else goes with it (apt removes dependents without asking).
                 let also: Vec<String> = if which("apt-get") {
@@ -410,7 +598,85 @@ fn dkms() -> Vec<Issue> {
                 actions,
             }
         })
-        .collect()
+        .collect();
+    let working: Vec<String> =
+        modules.iter().filter(|m| kernels.iter().any(|k| ok.contains(&((*m).clone(), k.clone())))).cloned().collect();
+    issues.extend(missing_headers(&working, &running));
+    issues
+}
+
+/// Headers package for a kernel, if the package manager has a naming rule for it.
+fn headers_package(kernel: &str) -> Option<String> {
+    if which("apt-get") {
+        Some(format!("linux-headers-{kernel}"))
+    } else if which("dnf") || which("zypper") {
+        Some(format!("kernel-devel-{kernel}"))
+    } else if which("pacman") {
+        // Arch records which kernel package a modules folder belongs to.
+        let base = std::fs::read_to_string(format!("/lib/modules/{kernel}/pkgbase")).ok()?;
+        let base = base.trim();
+        (!base.is_empty()).then(|| format!("{base}-headers"))
+    } else {
+        None
+    }
+}
+
+/// Kernels you can start (at least as new as the running one) that have no
+/// headers, so DKMS drivers that work elsewhere aren't built for them at all.
+fn missing_headers(working_modules: &[String], running: &str) -> Vec<Issue> {
+    if working_modules.is_empty() {
+        return Vec::new();
+    }
+    let Ok(rd) = std::fs::read_dir("/lib/modules") else { return Vec::new() };
+    let mut ks: Vec<String> = rd
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|k| {
+            (Path::new(&format!("/boot/vmlinuz-{k}")).exists() || Path::new(&format!("/lib/modules/{k}/vmlinuz")).exists())
+                && !Path::new(&format!("/lib/modules/{k}/build")).exists()
+                && kernel_key(k) >= kernel_key(running)
+        })
+        .collect();
+    if ks.is_empty() {
+        return Vec::new();
+    }
+    ks.sort_by_key(|k| kernel_key(k));
+    let names: Vec<&str> = working_modules.iter().map(|m| m.split('/').next().unwrap_or(m)).collect();
+    let pkgs: Vec<String> = ks.iter().filter_map(|k| headers_package(k)).collect::<BTreeSet<_>>().into_iter().collect();
+    let mut actions = Vec::new();
+    if !pkgs.is_empty() {
+        let q: Vec<String> = pkgs.iter().map(|p| sh_quote(p)).collect();
+        let install = if which("apt-get") {
+            format!("apt-get install -y {}", q.join(" "))
+        } else if which("dnf") {
+            format!("dnf install -y {}", q.join(" "))
+        } else if which("zypper") {
+            format!("zypper -n install {}", q.join(" "))
+        } else {
+            format!("pacman -S --noconfirm --needed {}", q.join(" "))
+        };
+        let build = ks.iter().map(|k| format!("dkms autoinstall -k {}", sh_quote(k))).collect::<Vec<_>>().join(" && ");
+        actions.push(root_script(
+            "Install headers",
+            format!("{install} && {build}"),
+            format!("Install {} and build {} for kernel {}?", pkgs.join(", "), names.join(", "), ks.join(", ")),
+        ));
+    }
+    let mut items: Vec<String> = ks.iter().map(|k| format!("kernel {k}")).collect();
+    items.extend(pkgs.iter().map(|p| format!("missing: {p}")));
+    vec![Issue {
+        title: format!("Kernel {} has no headers, so drivers aren't built for it", ks.join(", ")),
+        detail: format!(
+            "Drivers like {} are built on your computer for each kernel, which needs that kernel's headers. Kernel {} \
+             has none installed, so if you start it, the hardware these drivers are for won't work. Install the \
+             headers, and the drivers are built for it.",
+            names.join(", "),
+            ks.join(", ")
+        ),
+        items,
+        severity: Severity::Warning,
+        actions,
+    }]
 }
 
 // ------------------------------------------------------------ services
@@ -637,5 +903,24 @@ mod tests {
         );
         assert_eq!(parse_dkms_line("openrazer-driver/3.12.4: added"), None);
         assert!(kernel_key("6.8.0-151-generic") > kernel_key("6.8.0-60-generic"));
+    }
+
+    #[test]
+    fn build_failures() {
+        let api = "  CC [M]  /var/lib/dkms/openrazer-driver/3.12.4/build/driver/razerkbd_driver.o\n\
+/var/lib/dkms/openrazer-driver/3.12.4/build/driver/razerkbd_driver.c:4856:29: error: too few arguments to function 'hid_report_raw_event'\n";
+        let (e, k) = classify_build_log(api);
+        assert_eq!(k, BuildFailure::KernelApi);
+        assert_eq!(e.as_deref(), Some("razerkbd_driver.c:4856:29: error: too few arguments to function 'hid_report_raw_event'"));
+
+        let gcc = "warning: the compiler differs from the one used to build the kernel\n\
+  The kernel was built by: x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\n\
+  You are using:           gcc-12 (Ubuntu 12.3.0) 12.3.0\n\
+gcc-12: error: unrecognized command-line option '-ftrivial-auto-var-init=zero'\n";
+        assert_eq!(classify_build_log(gcc).1, BuildFailure::OldCompiler(Some("gcc-13".into())));
+
+        assert_eq!(classify_build_log("/bin/sh: 1: gcc: not found\n").1, BuildFailure::NoCompiler);
+        assert_eq!(classify_build_log("foo.c:1: error: something odd\n").1, BuildFailure::Other);
+        assert_eq!(classify_build_log(""), (None, BuildFailure::Other));
     }
 }
