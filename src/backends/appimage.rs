@@ -38,6 +38,8 @@ pub struct Info {
     pub desktop_raw: String,
     pub needs_fuse2: bool,
     pub warning: Option<String>,
+    /// An installed copy of the same app this one replaces: (path, version).
+    pub replaces: Option<(String, String)>,
 }
 
 fn slug(s: &str) -> String {
@@ -45,7 +47,7 @@ fn slug(s: &str) -> String {
     s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
 }
 
-fn parse_desktop(raw: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_desktop(raw: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     let mut main = false;
     for l in raw.lines() {
@@ -149,9 +151,11 @@ pub fn inspect(path: &str) -> Result<Info> {
         desktop_raw: String::new(),
         needs_fuse2: false,
         warning: None,
+        replaces: None,
     };
     if kind != 2 {
         info.warning = Some("Old-style (type 1) AppImage: no icon or description could be read.".into());
+        info.replaces = installed_copy(&info);
         return Ok(info);
     }
     let work = stage_dir.join("x");
@@ -187,7 +191,32 @@ pub fn inspect(path: &str) -> Result<Info> {
     }
     // Old runtimes need libfuse2; newer static runtimes don't.
     info.needs_fuse2 = !fuse2_available();
+    info.replaces = installed_copy(&info);
     Ok(info)
+}
+
+/// An installed AppImage of the same app (same menu name, or the same file
+/// name apart from version and architecture), other than the file itself.
+fn installed_copy(info: &Info) -> Option<(String, String)> {
+    let me = canonical(&info.original);
+    let file = Path::new(&info.original).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = file_stem_key(&file);
+    list().ok()?.into_iter().find_map(|p| {
+        let other = Path::new(&p.id).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let same = slug(&p.name) == slug(&info.name) || (!stem.is_empty() && file_stem_key(&other) == stem);
+        (same && canonical(&p.id) != me).then_some((p.id, p.version))
+    })
+}
+
+/// "Package_Tracker-0.1.2-x86_64.AppImage" → "package-tracker".
+pub(crate) fn file_stem_key(file: &str) -> String {
+    const ARCH: [&str; 7] = ["x86", "x86_64", "amd64", "i386", "i686", "aarch64", "arm64"];
+    let stem = file.trim_end_matches(".AppImage").trim_end_matches(".appimage");
+    let words: Vec<&str> = stem
+        .split(['-', '_', '.', ' '])
+        .take_while(|w| !w.is_empty() && !w.starts_with(|c: char| c.is_ascii_digit()) && !ARCH.contains(&w.to_lowercase().as_str()))
+        .collect();
+    slug(&words.join("-"))
 }
 
 fn icon_ext(path: &str) -> &'static str {
@@ -207,6 +236,15 @@ pub fn install(info: &Info) -> Result<String> {
     std::fs::create_dir_all(desktop_dir())?;
     let file = Path::new(&info.staged).file_name().unwrap().to_string_lossy().into_owned();
     let target = format!("{}/{file}", apps_dir());
+    // Take the old version out first (file to the Trash, its menu entries and icon removed).
+    let mut replaced = String::new();
+    if let Some((old, ver)) = &info.replaces {
+        if Path::new(old).exists() {
+            let old_pkg = list()?.into_iter().find(|p| p.id == *old).context("the installed copy could not be found")?;
+            remove(&old_pkg).context("could not remove the old version")?;
+            replaced = if ver.is_empty() { " It replaced the old version (now in the Trash).".into() } else { format!(" It replaced version {ver} (now in the Trash).") };
+        }
+    }
     if Path::new(&target).exists() {
         bail!("{target} already exists. Uninstall the old one first.");
     }
@@ -266,7 +304,7 @@ pub fn install(info: &Info) -> Result<String> {
     std::fs::write(&desktop, out.join("\n") + "\n")?;
     let _ = Command::new("update-desktop-database").arg(desktop_dir()).output();
     let _ = std::fs::remove_dir_all(Path::new(&info.staged).parent().unwrap_or(Path::new("/nonexistent")));
-    Ok(format!("{} was installed and added to your app menu.", info.name))
+    Ok(format!("{} was installed and added to your app menu.{replaced}", info.name))
 }
 
 /// Is this file an AppImage (by its magic bytes, whatever its name)?
@@ -274,13 +312,17 @@ fn is_appimage(path: &str) -> bool {
     appimage_type(path).is_ok()
 }
 
+pub(crate) fn is_appimage_file(path: &str) -> bool {
+    Path::new(path).is_file() && is_appimage(path)
+}
+
 /// Real path of a file (follows symlinks); the path itself if that fails.
-fn canonical(path: &str) -> String {
+pub(crate) fn canonical(path: &str) -> String {
     std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string())
 }
 
 /// Path of the AppImage a desktop file launches, if any.
-fn appimage_of(fields: &BTreeMap<String, String>) -> Option<String> {
+pub(crate) fn appimage_of(fields: &BTreeMap<String, String>) -> Option<String> {
     if let Some(p) = fields.get(MARK) {
         return Some(p.clone());
     }
@@ -528,7 +570,7 @@ fn own_icons(icon: &str) -> Vec<PathBuf> {
 }
 
 /// Ask the desktop to reload its app menu.
-fn refresh_menus(dirs: &std::collections::BTreeSet<PathBuf>) {
+pub(crate) fn refresh_menus(dirs: &std::collections::BTreeSet<PathBuf>) {
     for d in dirs {
         let _ = Command::new("update-desktop-database").arg(d).output();
     }
@@ -748,6 +790,57 @@ mod tests {
             std::env::remove_var("XDG_CONFIG_HOME");
             std::env::remove_var("XDG_DATA_DIRS");
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Installing a new version of an installed AppImage replaces the old
+    /// copy (same file name, as with Package_Tracker-x86_64.AppImage, or a
+    /// different one) instead of leaving two.
+    #[test]
+    fn new_version_replaces_old() {
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("pkgtrack-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let h = home.to_string_lossy().into_owned();
+        std::fs::create_dir_all(format!("{h}/dl")).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", format!("{h}/.local/share"));
+            std::env::set_var("XDG_CONFIG_HOME", format!("{h}/.config"));
+            std::env::set_var("XDG_DATA_DIRS", format!("{h}/no-system"));
+        }
+        let stage = |file: &str, version: &str, body: &[u8]| -> Info {
+            let dir = format!("{h}/stage-{version}");
+            std::fs::create_dir_all(&dir).unwrap();
+            let staged = format!("{dir}/{file}");
+            std::fs::write(&staged, body).unwrap();
+            let original = format!("{h}/dl/{file}");
+            std::fs::write(&original, body).unwrap();
+            let raw = "[Desktop Entry]\nType=Application\nName=Cool App\nExec=coolapp %U\n".to_string();
+            let mut i = Info {
+                staged, original, name: "Cool App".into(), comment: String::new(), version: version.into(),
+                categories: String::new(), size: 1, icon: None, desktop: parse_desktop(&raw), desktop_raw: raw,
+                needs_fuse2: false, warning: None, replaces: None,
+            };
+            i.replaces = installed_copy(&i);
+            i
+        };
+        let v1 = stage("CoolApp-x86_64.AppImage", "1.0", b"\x7fELF\x02\x01\x01\x00AI\x02one");
+        assert!(v1.replaces.is_none());
+        install(&v1).unwrap();
+        // Same file name, new version.
+        let v2 = stage("CoolApp-x86_64.AppImage", "2.0", b"\x7fELF\x02\x01\x01\x00AI\x02two");
+        assert_eq!(v2.replaces.as_ref().map(|r| r.1.as_str()), Some("1.0"));
+        let msg = install(&v2).unwrap();
+        assert!(msg.contains("replaced version 1.0"), "{msg}");
+        // Different file name, new version.
+        let v3 = stage("CoolApp-3.0-x86_64.AppImage", "3.0", b"\x7fELF\x02\x01\x01\x00AI\x02three");
+        assert_eq!(v3.replaces.as_ref().map(|r| r.1.as_str()), Some("2.0"));
+        install(&v3).unwrap();
+        let l = list().unwrap();
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert_eq!(l[0].version, "3.0");
+        assert!(l[0].id.ends_with("CoolApp-3.0-x86_64.AppImage"));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

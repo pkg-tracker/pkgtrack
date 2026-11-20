@@ -26,7 +26,7 @@ fn result(source: Source, id: &str, name: &str, version: &str, summary: &str, ex
 pub fn search(src: Source, q: &str) -> Result<Vec<Package>> {
     let mut v = Vec::new();
     match src {
-        Source::AppImage => return Ok(v), // no repository to search
+        Source::AppImage | Source::Manual => return Ok(v), // no repository to search
         Source::Apt => {
             for l in run("apt-cache", &["search", q], &[])?.lines() {
                 if let Some((name, summary)) = l.split_once(" - ") {
@@ -142,7 +142,7 @@ pub fn remote_details(pkg: &Package) -> (Package, Details) {
     let mut pkg = pkg.clone();
     let mut d = Details::default();
     match pkg.source {
-        Source::AppImage => {}
+        Source::AppImage | Source::Manual => {}
         Source::Apt => {
             if let Ok(out) = run("apt-cache", &["show", "--no-all-versions", &pkg.id], &[]) {
                 // Long description: "Description(-en):" followed by indented lines.
@@ -250,5 +250,6 @@ pub fn install(pkg: &Package) -> Result<String> {
         Source::Snap if pkg.extra.contains("classic") => run_privileged(&["snap", "install", "--classic", &pkg.id]),
         Source::Snap => run_privileged(&["snap", "install", &pkg.id]),
         Source::AppImage => anyhow::bail!("Use \"Install AppImage…\" for AppImage files."),
+        Source::Manual => anyhow::bail!("Apps installed by hand can't be installed from here."),
     }
 }

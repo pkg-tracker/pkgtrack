@@ -10,6 +10,8 @@ pub enum Source {
     Flatpak,
     Snap,
     AppImage,
+    /// Installed by hand (install script, tarball, make install).
+    Manual,
 }
 
 impl Source {
@@ -21,6 +23,7 @@ impl Source {
             Source::Flatpak => "Flatpak",
             Source::Snap => "Snap",
             Source::AppImage => "AppImage",
+            Source::Manual => "Installed by hand",
         }
     }
     pub fn short(self) -> &'static str {
@@ -31,6 +34,7 @@ impl Source {
             Source::Flatpak => "flatpak",
             Source::Snap => "snap",
             Source::AppImage => "appimage",
+            Source::Manual => "manual",
         }
     }
 }

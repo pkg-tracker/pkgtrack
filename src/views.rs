@@ -528,6 +528,15 @@ impl App {
             .spacing(10),
         );
         col = col.push(muted(format!("It will be saved as ~/Applications/{file} and added to your app menu. Your original file stays where it is.")).size(12));
+        if let Some((old, ver)) = &i.replaces {
+            let what = if ver.is_empty() { "an older copy".to_string() } else { format!("version {ver}") };
+            col = col.push(card(
+                text(format!(
+                    "{} is already installed ({what}, {old}). Installing replaces it: the old file goes to the Trash and its menu entry is replaced, so you don't end up with two."
+                , i.name)).size(12).into(),
+                Some(BLUE),
+            ));
+        }
         if let Some(w) = &i.warning {
             col = col.push(card(text(w.clone()).size(12).into(), Some(YELLOW)));
         }
@@ -742,6 +751,73 @@ impl App {
                         .style(button::primary)
                         .on_press(Message::AcceptDisclaimer)
                         .tip("Don't show this again"),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        popup_frame(col.into())
+    }
+
+    pub(crate) fn about_view(&self) -> Element<'_, Message> {
+        let repo = format!("https://github.com/{}", crate::update::repo());
+        let point = |s: &'static str| row![text("•").size(13), text(s).size(13)].spacing(8);
+        let fact = |k: &'static str, v: String| row![muted(k.into()).size(13).width(Length::Fixed(110.0)), text(v).size(13)].spacing(8);
+        let opt = |s: &'static str| if s.is_empty() { "unknown".to_string() } else { s.to_string() };
+        let running_from = match std::env::var("APPIMAGE") {
+            Ok(p) if !p.is_empty() => format!("{p} (AppImage)"),
+            _ => std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "unknown".into()),
+        };
+        let col = Column::new()
+            .spacing(14)
+            .push(
+                column![
+                    text("Package Tracker").size(24).font(BOLD),
+                    muted(format!("Version {}", crate::update::CURRENT)).size(14),
+                ]
+                .spacing(4),
+            )
+            .push(text(env!("CARGO_PKG_DESCRIPTION")).size(14))
+            .push(section_title("WHAT IT DOES"))
+            .push(
+                column![
+                    point("Lists everything installed, from APT, RPM, pacman, Flatpak, Snap, AppImages and apps installed by hand, in one place."),
+                    point("Tells you whether each package is safe to remove, what uses it, and whether it collects telemetry."),
+                    point("Finds problems (unfinished installs, drivers that don't build, failed services, low disk space) and offers fixes."),
+                    point("Updates, installs and removes software, always showing the exact command and asking first."),
+                    point("Shows startup apps, software sources, network connections and your install history."),
+                ]
+                .spacing(6),
+            )
+            .push(section_title("THIS BUILD"))
+            .push(
+                column![
+                    fact("Version", crate::update::CURRENT.to_string()),
+                    fact("Built on", opt(env!("PKGTRACK_BUILD_DATE"))),
+                    fact("Built by", env!("PKGTRACK_BUILT_BY").to_string()),
+                    fact("Commit", opt(env!("PKGTRACK_COMMIT"))),
+                    fact("Running from", running_from),
+                ]
+                .spacing(4),
+            )
+            .push(section_title("WHO MAKES IT"))
+            .push(text(format!(
+                "Package Tracker developers, as open source at {repo}. Written in Rust with the iced toolkit. \
+                 Free software under the {} license, provided \u{201c}as is\u{201d}, without warranty.",
+                env!("CARGO_PKG_LICENSE")
+            )).size(13))
+            .push(muted(
+                "Privacy: Package Tracker itself only contacts GitHub, once at startup, to check for a new version \
+                 (you can turn that off). Nothing about your computer is sent. Your package managers reach their own servers as usual.".into(),
+            ).size(12))
+            .push(
+                row![
+                    button(text("Website").size(14)).padding([9, 16]).style(button::secondary)
+                        .on_press(Message::OpenUrl(repo.clone())).tip("Open the project page on GitHub"),
+                    button(text("Report a problem").size(14)).padding([9, 16]).style(button::secondary)
+                        .on_press(Message::OpenUrl(format!("{repo}/issues"))).tip("Open GitHub issues"),
+                    horizontal_space(),
+                    button(text("Close").size(14)).padding([9, 16]).style(button::primary)
+                        .on_press(Message::CloseAbout).tip("Close (Esc)"),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),

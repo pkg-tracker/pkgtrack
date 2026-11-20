@@ -61,6 +61,15 @@ pub fn verdict(p: &Package, d: &Details, duplicates: usize) -> Verdict {
             reasons: vec!["Marked essential/required by your distribution.".into()],
         };
     }
+    if p.source == Source::Manual {
+        if let Some(why) = backends::manual::cant_remove(&p.id) {
+            let mut reasons = vec![why];
+            if duplicates > 0 {
+                reasons.push("Another copy is installed from a different source (see Suggestions → Duplicates).".into());
+            }
+            return Verdict { risk: Risk::Caution, headline: "Installed by hand; remove it the way you installed it.".into(), reasons };
+        }
+    }
 
     // Packages that would go away together with it.
     let extra: Vec<&str> = d
@@ -228,9 +237,13 @@ pub fn describe(kind: &ActionKind) -> String {
             d.join(" ")
         ),
         ActionKind::InstallAppImage(i) => format!(
-            "Move {} to ~/Applications and add {} to your app menu (no password needed)",
+            "Move {} to ~/Applications and add {} to your app menu{} (no password needed)",
             std::path::Path::new(&i.staged).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-            i.name
+            i.name,
+            match &i.replaces {
+                Some((old, _)) => format!(", replacing {old} (moved to the Trash)"),
+                None => String::new(),
+            }
         ),
     }
 }
@@ -558,6 +571,24 @@ pub struct Suggestions {
     pub issues: Vec<crate::health::Issue>,
 }
 
+/// How to name one copy in a duplicate group: its source, plus its version
+/// or file when another copy comes from the same source.
+fn copy_label(members: &[Member], i: usize) -> String {
+    let p = &members[i].pkg;
+    let src = match p.source {
+        Source::Manual => "hand-installed".to_string(),
+        s => s.label().to_string(),
+    };
+    if members.iter().filter(|m| m.pkg.source == p.source).count() < 2 {
+        return src;
+    }
+    if !p.version.is_empty() && members.iter().filter(|m| m.pkg.source == p.source && m.pkg.version == p.version).count() == 1 {
+        format!("{src} {}", p.version)
+    } else {
+        format!("{src} ({})", p.id)
+    }
+}
+
 /// Names used to spot the same app installed from different sources.
 fn dup_keys(p: &Package) -> Vec<String> {
     let norm = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
@@ -580,6 +611,13 @@ fn dup_keys(p: &Package) -> Vec<String> {
                 return keys;
             }
             keys.push(norm(&p.id));
+        }
+        // Their ids are file paths: use the menu name and the file name
+        // without version and architecture ("Obsidian-1.6.7-x86_64.AppImage").
+        Source::AppImage | Source::Manual => {
+            keys.push(norm(&p.name));
+            let file = p.id.rsplit('/').next().unwrap_or(&p.id);
+            keys.push(norm(&backends::appimage::file_stem_key(file)));
         }
         _ => {
             let transitional = p.version.contains("snap");
@@ -630,7 +668,10 @@ pub fn find_duplicates(all: &[Package]) -> Vec<Vec<Package>> {
         idx.sort();
         idx.dedup();
         let sources: HashSet<Source> = idx.iter().map(|&i| all[i].source).collect();
-        if sources.len() < 2 || !idx.iter().any(|&i| all[i].kind == Kind::App) {
+        // Two AppImages or hand-installed copies of one app count too
+        // (package managers themselves never install an app twice).
+        let loose = idx.iter().filter(|&&i| matches!(all[i].source, Source::AppImage | Source::Manual)).count();
+        if (sources.len() < 2 && loose < 2) || !idx.iter().any(|&i| all[i].kind == Kind::App) {
             continue;
         }
         if seen.insert(idx.clone()) {
@@ -757,6 +798,8 @@ pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
                 .map(|(i, _)| (i, "it has the newest version".to_string()))
         };
         let name = members.iter().find(|m| m.pkg.kind == Kind::App).map(|m| m.pkg.name.clone()).unwrap_or_default();
+        let labels: Vec<String> = (0..members.len()).map(|i| copy_label(&members, i)).collect();
+        let label = |i: usize| labels[i].clone();
         let advice = match &keep {
             Some((i, why)) => {
                 members[*i].keep = true;
@@ -764,14 +807,14 @@ pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
                     .iter()
                     .enumerate()
                     .filter(|(j, m)| j != i && m.note.is_empty())
-                    .map(|(_, m)| format!("the {} copy", m.pkg.source.label()))
+                    .map(|(j, _)| format!("the {} copy", label(j)))
                     .collect();
                 if others.is_empty() {
-                    format!("Keep the {} version ({why}). The other entry is harmless.", members[*i].pkg.source.label())
+                    format!("Keep the {} version ({why}). The other entry is harmless.", label(*i))
                 } else {
                     format!(
                         "Keep the {} version ({why}) and remove {}. Settings in your home folder are usually shared, so you lose nothing.",
-                        members[*i].pkg.source.label(),
+                        label(*i),
                         others.join(" and ")
                     )
                 }
@@ -1404,6 +1447,20 @@ mod tests {
             .collect();
         g.sort();
         assert_eq!(g, vec![vec!["code".to_string(), "com.visualstudio.code".into()], vec!["org.videolan.VLC".into(), "vlc".into()]]);
+
+        // Two AppImages of one app, or an AppImage and a hand-installed copy.
+        let loose = vec![
+            pkg("/home/u/Applications/Obsidian-1.6.7.AppImage", "Obsidian", Source::AppImage, Kind::App, "1.6.7"),
+            pkg("/home/u/Applications/Obsidian-1.7.0-x86_64.AppImage", "Obsidian", Source::AppImage, Kind::App, "1.7.0"),
+            pkg("/home/u/Applications/Package_Tracker-x86_64.AppImage", "Package Tracker", Source::AppImage, Kind::App, ""),
+            pkg("/home/u/.local/bin/pkgtrack", "Package Tracker", Source::Manual, Kind::App, ""),
+            pkg("/home/u/Applications/Other.AppImage", "Other", Source::AppImage, Kind::App, "1"),
+        ];
+        let mut g: Vec<usize> = find_duplicates(&loose).iter().map(Vec::len).collect();
+        g.sort();
+        assert_eq!(g, vec![2, 2]);
+        assert_eq!(crate::backends::appimage::file_stem_key("Package_Tracker-0.1.2-x86_64.AppImage"), "package-tracker");
+        assert_eq!(crate::backends::appimage::file_stem_key("Obsidian-1.6.7.AppImage"), "obsidian");
     }
 
     #[test]
