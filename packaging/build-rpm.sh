@@ -43,6 +43,7 @@ install -Dm644 assets/pkgtrack.svg %{buildroot}/usr/share/icons/hicolor/scalable
 for s in 32 48 64 128 256 512; do
   install -Dm644 assets/pkgtrack-\$s.png %{buildroot}/usr/share/icons/hicolor/\${s}x\${s}/apps/$ID.png
 done
+install -Dm644 assets/$ID.metainfo.xml %{buildroot}/usr/share/metainfo/$ID.metainfo.xml
 install -Dm644 README.md %{buildroot}/usr/share/doc/pkgtrack/README.md
 install -Dm644 LICENSE %{buildroot}/usr/share/licenses/pkgtrack/LICENSE
 
@@ -50,6 +51,7 @@ install -Dm644 LICENSE %{buildroot}/usr/share/licenses/pkgtrack/LICENSE
 /usr/bin/pkgtrack
 /usr/share/applications/$ID.desktop
 /usr/share/icons/hicolor/*/apps/$ID.*
+/usr/share/metainfo/$ID.metainfo.xml
 /usr/share/doc/pkgtrack
 /usr/share/licenses/pkgtrack
 SPEC

@@ -21,6 +21,7 @@ install -Dm644 assets/$ID.desktop "$APPDIR/$ID.desktop"
 install -Dm644 assets/$ID.desktop "$APPDIR/usr/share/applications/$ID.desktop"
 install -Dm644 assets/pkgtrack-256.png "$APPDIR/$ID.png"
 install -Dm644 assets/pkgtrack-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/$ID.png"
+install -Dm644 assets/$ID.metainfo.xml "$APPDIR/usr/share/metainfo/$ID.appdata.xml"
 cat > "$APPDIR/AppRun" <<'RUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -28,5 +29,10 @@ exec "$HERE/usr/bin/pkgtrack" "$@"
 RUN
 chmod +x "$APPDIR/AppRun"
 mkdir -p dist
-ARCH=$ARCH "$TOOL" "$APPDIR" "dist/Package_Tracker-$ARCH.AppImage"
+# Validate the metadata offline: appimagetool's own check also fetches every
+# URL in it, which fails the build whenever GitHub is unreachable.
+if command -v appstreamcli >/dev/null; then
+  appstreamcli validate --no-net "assets/$ID.metainfo.xml"
+fi
+ARCH=$ARCH "$TOOL" --no-appstream "$APPDIR" "dist/Package_Tracker-$ARCH.AppImage"
 echo "Built dist/Package_Tracker-$ARCH.AppImage"

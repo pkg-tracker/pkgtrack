@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: what software centers show about the app. -->
+<component type="desktop-application">
+  <id>io.github.pkgtrack</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Package Tracker</name>
+  <summary>See, update, install and remove packages and check them for telemetry</summary>
+  <developer_name>Package Tracker developers</developer_name>
+  <description>
+    <p>
+      A fast, native app that shows everything installed on your system across
+      package managers: APT, RPM (dnf/zypper), pacman, Flatpak, Snap and AppImages.
+    </p>
+    <ul>
+      <li>Uninstall with a preview of what else would be removed, and a verdict on whether it is safe</li>
+      <li>Update single packages, a selection, or everything with one password prompt</li>
+      <li>See what uses a package, including running processes</li>
+      <li>Search and install new software from every source at once</li>
+      <li>Find apps installed twice, unused dependencies and leftover data</li>
+      <li>Spot known telemetry and turn it off</li>
+      <li>Watch live network connections per program</li>
+      <li>Manage login apps and services, repositories and install history</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.pkgtrack.desktop</launchable>
+  <icon type="stock">io.github.pkgtrack</icon>
+  <url type="homepage">https://github.com/pkg-tracker/pkgtrack</url>
+  <url type="bugtracker">https://github.com/pkg-tracker/pkgtrack/issues</url>
+  <url type="vcs-browser">https://github.com/pkg-tracker/pkgtrack</url>
+  <categories>
+    <category>System</category>
+    <category>PackageManager</category>
+  </categories>
+  <keywords>
+    <keyword>package</keyword>
+    <keyword>uninstall</keyword>
+    <keyword>update</keyword>
+    <keyword>flatpak</keyword>
+    <keyword>snap</keyword>
+    <keyword>telemetry</keyword>
+    <keyword>privacy</keyword>
+  </keywords>
+  <provides>
+    <binary>pkgtrack</binary>
+  </provides>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.1" date="2026-11-18">
+      <description>
+        <ul>
+          <li>Tick several packages and update them together</li>
+          <li>.rpm package for Fedora, RHEL and openSUSE</li>
+          <li>AppStream metadata for software centers</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-11-18">
+      <description>
+        <p>First public release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
