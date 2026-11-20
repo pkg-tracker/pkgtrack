@@ -91,6 +91,35 @@ fn extract(exe: &Path, workdir: &Path, pattern: &str) {
         .output();
 }
 
+/// Newest release listed in the AppImage's AppStream metadata, if any.
+fn metainfo_version(exe: &Path, work: &Path) -> Option<String> {
+    for dir in ["usr/share/metainfo", "usr/share/appdata"] {
+        extract(exe, work, &format!("{dir}/*"));
+        let Ok(rd) = std::fs::read_dir(work.join("squashfs-root").join(dir)) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".xml") {
+                continue;
+            }
+            let Some(p) = resolve(exe, work, &format!("{dir}/{name}")) else { continue };
+            if let Some(v) = std::fs::read_to_string(p).ok().and_then(|x| first_release(&x)) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// `<release version="1.2.3" …>`: releases are listed newest first.
+fn first_release(xml: &str) -> Option<String> {
+    let at = xml.find("<release ")?;
+    let tag = &xml[at..at + xml[at..].find('>')?];
+    let v = tag.split("version=").nth(1)?;
+    let q = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let v = v[1..].split(q).next()?.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
 /// Root entries are often symlinks into usr/share/...; extract the targets too.
 /// Returns the real file, if it could be extracted.
 fn resolve(exe: &Path, work: &Path, rel: &str) -> Option<PathBuf> {
@@ -176,6 +205,9 @@ pub fn inspect(path: &str) -> Result<Info> {
         info.categories = info.desktop.get("Categories").cloned().unwrap_or_default();
         if let Some(v) = info.desktop.get("X-AppImage-Version").filter(|v| !v.is_empty()) {
             info.version = v.clone();
+        }
+        if info.version.is_empty() {
+            info.version = metainfo_version(&staged, &work).unwrap_or_default();
         }
         // Icon: <Icon>.png / .svg at the root, or .DirIcon.
         let icon = info.desktop.get("Icon").cloned().unwrap_or_default();
@@ -472,9 +504,14 @@ pub fn list() -> Result<Vec<Package>> {
             continue;
         }
         let file = Path::new(&img).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut version = f.get("X-AppImage-Version").cloned().filter(|v| !v.is_empty()).unwrap_or_else(|| version_from_filename(&file));
+        // Package Tracker's own AppImage: we know which version is running.
+        if version.is_empty() && std::env::var("APPIMAGE").is_ok_and(|me| canonical(&me) == real) {
+            version = crate::update::CURRENT.to_string();
+        }
         v.push(Package {
             name: f.get("Name").cloned().unwrap_or_else(|| file.clone()),
-            version: f.get("X-AppImage-Version").cloned().unwrap_or_else(|| version_from_filename(&file)),
+            version,
             source: Source::AppImage,
             summary: f.get("Comment").cloned().unwrap_or_default(),
             size_bytes: std::fs::metadata(&real).ok().map(|m| m.len()),
@@ -842,5 +879,15 @@ mod tests {
         assert_eq!(l[0].version, "3.0");
         assert!(l[0].id.ends_with("CoolApp-3.0-x86_64.AppImage"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn release_version() {
+        let xml = r#"<component><releases>
+    <release version="0.1.5" date="2026-11-20"><description/></release>
+    <release version='0.1.4' date="2026-11-20"/></releases></component>"#;
+        assert_eq!(first_release(xml).as_deref(), Some("0.1.5"));
+        assert_eq!(first_release("<release date='x' version='2.0'/>").as_deref(), Some("2.0"));
+        assert_eq!(first_release("<component/>"), None);
     }
 }

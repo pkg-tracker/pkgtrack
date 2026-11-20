@@ -367,6 +367,9 @@ enum Message {
     Tick,
     OpenUrl(String),
     ShowAbout,
+    ToggleOutput,
+    ClearOutput,
+    CopyOutput,
     CloseAbout,
     AppImagePath(String),
     BrowseAppImage,
@@ -441,6 +444,10 @@ struct App {
     disclaimer: bool,
     /// The About window is open.
     about: bool,
+    /// The Output panel at the bottom is open.
+    show_output: bool,
+    /// What commands printed, newest last (capped).
+    output: Vec<String>,
     // --- suggestions tab
     suggestions: Option<advice::Suggestions>,
     scanning: bool,
@@ -523,6 +530,8 @@ impl App {
             app_update_check: update::enabled(),
             disclaimer: !update::disclaimer_accepted(),
             about: false,
+            show_output: false,
+            output: Vec::new(),
             suggestions: None,
             scanning: false,
             pending: None,
@@ -697,6 +706,7 @@ impl App {
 
     fn execute(&mut self, a: advice::Action) -> Task<Message> {
         self.busy = Some(format!("{}…", a.label));
+        backends::output::push(format!("\u{25b6} {}", a.label));
         Task::perform(
             blocking(move || {
                 advice::run_action(&a.kind)
@@ -727,7 +737,21 @@ impl App {
         })
     }
 
+    /// Move new command output into the panel's buffer.
+    fn drain_output(&mut self) {
+        let new = backends::output::drain();
+        if new.is_empty() {
+            return;
+        }
+        self.output.extend(new);
+        const MAX: usize = 5000;
+        if self.output.len() > MAX {
+            self.output.drain(..self.output.len() - MAX);
+        }
+    }
+
     fn update(&mut self, msg: Message) -> Task<Message> {
+        self.drain_output();
         match msg {
             Message::Loaded(src, res) => {
                 self.loading.remove(&src);
@@ -880,6 +904,9 @@ impl App {
             },
             Message::CloseAppUpdate => self.app_update = None,
             Message::ShowAbout => self.about = true,
+            Message::ToggleOutput => self.show_output = !self.show_output,
+            Message::ClearOutput => self.output.clear(),
+            Message::CopyOutput => return iced::clipboard::write(self.output.join("\n")),
             Message::CloseAbout => self.about = false,
             Message::AcceptDisclaimer => {
                 self.disclaimer = false;
@@ -1009,6 +1036,11 @@ impl App {
             Message::ActionDone(res) => {
                 self.busy = None;
                 let ok = res.is_ok();
+                self.output.push(match &res {
+                    Ok(m) => format!("\u{2714} {m}"),
+                    Err(e) => format!("\u{2716} {}", e.lines().next().unwrap_or("Failed")),
+                });
+                self.output.push(String::new());
                 self.status = Some(match res {
                     Ok(m) => (true, m),
                     Err(e) => (false, e),
@@ -1253,7 +1285,7 @@ impl App {
             (None, Some(rel)) => modal(base.into(), self.app_update_view(rel), Message::CloseAppUpdate),
             (None, None) => base.into(),
         };
-        match &self.busy {
+        let main: Element<Message> = match &self.busy {
             // Something is running (uninstall, update, cleanup…): dim the window and show progress.
             Some(what) => stack![
                 page,
@@ -1263,6 +1295,9 @@ impl App {
                             spinner::spinner(190.0),
                             text(what.clone()).size(18).font(BOLD),
                             muted("If a password prompt appears, enter your password to continue.".into()).size(12),
+                            button(text(if self.show_output { "Hide output" } else { "Show output" }).size(12))
+                                .style(button::text)
+                                .on_press(Message::ToggleOutput),
                         ]
                         .spacing(10)
                         .align_x(Alignment::Center),
@@ -1279,7 +1314,58 @@ impl App {
             ]
             .into(),
             None => page,
+        };
+        if self.show_output {
+            // Outside the overlay, so it stays readable while something runs.
+            column![container(main).height(Length::Fill), self.output_panel()].into()
+        } else {
+            main
         }
+    }
+
+    fn output_panel(&self) -> Element<'_, Message> {
+        let header = row![
+            text("Output").size(13).font(BOLD),
+            muted(if self.busy.is_some() { "running…".into() } else { format!("{} lines", self.output.len()) }).size(11),
+            iced::widget::horizontal_space(),
+            button(text("Copy").size(12)).style(button::secondary).padding([3, 10])
+                .on_press_maybe((!self.output.is_empty()).then_some(Message::CopyOutput)).tip("Copy all output, e.g. for a bug report"),
+            button(text("Clear").size(12)).style(button::secondary).padding([3, 10])
+                .on_press_maybe((!self.output.is_empty() && self.busy.is_none()).then_some(Message::ClearOutput)).tip("Empty the panel"),
+            button(text("Hide").size(12)).style(button::secondary).padding([3, 10]).on_press(Message::ToggleOutput).tip("Close the panel"),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let body: Element<Message> = if self.output.is_empty() {
+            muted("Commands that Package Tracker runs for you, and what they print, show up here as they happen.".into()).size(12).into()
+        } else {
+            let mut col = Column::new().spacing(1);
+            for l in &self.output {
+                let t = text(l.as_str()).size(12).font(Font::MONOSPACE);
+                col = col.push(match l.chars().next() {
+                    Some('$') => t.style(|th: &Theme| text::Style { color: Some(th.extended_palette().primary.base.color) }),
+                    Some('\u{2714}') => t.style(text::success),
+                    Some('\u{2716}') => t.style(text::danger),
+                    Some('\u{25b6}') => t.font(Font { weight: iced::font::Weight::Bold, ..Font::MONOSPACE }),
+                    _ => t,
+                });
+            }
+            scrollable(container(col).padding(iced::Padding { right: 12.0, ..Default::default() }))
+                .anchor_bottom()
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        };
+        container(column![header, body].spacing(6))
+            .padding([8, 14])
+            .height(Length::Fixed(230.0))
+            .width(Length::Fill)
+            .style(|t: &Theme| container::Style {
+                background: Some(t.extended_palette().background.weak.color.into()),
+                border: Border { width: 1.0, color: t.extended_palette().background.strong.color, ..Default::default() },
+                ..Default::default()
+            })
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -1394,6 +1480,13 @@ impl App {
     }
 
     fn sidebar_frame<'a>(&'a self, col: Column<'a, Message>) -> Element<'a, Message> {
+        let col = col.push(
+            button(text(if self.show_output { "Hide output" } else { "Show output" }).size(13))
+                .on_press(Message::ToggleOutput)
+                .style(button::secondary)
+                .width(Length::Fill)
+                .tip("A panel at the bottom with the commands Package Tracker runs and what they print"),
+        );
         let col = col.push(
             button(text("About").size(13))
                 .on_press(Message::ShowAbout)

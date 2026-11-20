@@ -69,14 +69,10 @@ pub fn run_privileged(args: &[&str]) -> Result<String> {
     if apt {
         cmd.args(["env", "DEBIAN_FRONTEND=noninteractive"]);
     }
-    let out = cmd
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
+    cmd.args(args);
+    let (code, log) = output::stream(cmd, &format!("sudo {}", output::shell_words(args)))
         .context("failed to start pkexec (is polkit installed?)")?;
-    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
-    log.push_str(&String::from_utf8_lossy(&out.stderr));
-    match out.status.code() {
+    match code {
         Some(0) => Ok(log),
         Some(126) | Some(127) => bail!("Authorization was cancelled or denied."),
         c => bail!("{}Command failed ({c:?}):\n{}", hint(&log), tail(&log, 15)),
@@ -96,10 +92,12 @@ fn hint(log: &str) -> &'static str {
 
 /// Run a command as the current user, capturing output.
 pub fn run_user(cmd: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(cmd).args(args).output()?;
-    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
-    log.push_str(&String::from_utf8_lossy(&out.stderr));
-    if out.status.success() {
+    let mut c = Command::new(cmd);
+    c.args(args);
+    let mut shown = vec![cmd];
+    shown.extend_from_slice(args);
+    let (code, log) = output::stream(c, &output::shell_words(&shown))?;
+    if code == Some(0) {
         Ok(log)
     } else {
         bail!("Command failed:\n{}", tail(&log, 15))
@@ -303,4 +301,107 @@ pub fn owner_of(path: &str) -> Option<String> {
         return None;
     };
     (!out.is_empty() && !out.contains(' ')).then_some(out)
+}
+
+/// Live output of the commands actions run, for the Output panel. Runners
+/// push lines here as they arrive; the UI drains them on every update.
+pub mod output {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub fn push(line: impl Into<String>) {
+        if let Ok(mut v) = PENDING.lock() {
+            v.push(line.into());
+        }
+    }
+
+    /// Lines added since the last call.
+    pub fn drain() -> Vec<String> {
+        PENDING.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
+    /// A command line as it would be typed, quoting words that need it.
+    pub fn shell_words(args: &[&str]) -> String {
+        args.iter()
+            .map(|a| {
+                if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c)) {
+                    a.to_string()
+                } else {
+                    format!("'{}'", a.replace('\'', r"'\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Read a pipe line by line, showing each line and keeping all of it.
+    /// Progress bars redraw with \r; only the last state of a line is shown.
+    fn pump(r: impl Read, keep: &Mutex<String>) {
+        let mut r = BufReader::new(r);
+        let mut buf = Vec::new();
+        while r.read_until(b'\n', &mut buf).map(|n| n > 0).unwrap_or(false) {
+            let text = String::from_utf8_lossy(&buf);
+            let line = text.trim_end_matches(['\n', '\r']).rsplit('\r').next().unwrap_or("").to_string();
+            if let Ok(mut k) = keep.lock() {
+                k.push_str(&line);
+                k.push('\n');
+            }
+            push(line);
+            buf.clear();
+        }
+    }
+
+    /// Run a command, streaming stdout and stderr to the Output panel.
+    /// Returns the exit code and everything it printed.
+    pub fn stream(mut cmd: Command, shown: &str) -> std::io::Result<(Option<i32>, String)> {
+        push(format!("$ {shown}"));
+        let mut child = match cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                push(format!("Could not start it: {e}"));
+                return Err(e);
+            }
+        };
+        let keep = Arc::new(Mutex::new(String::new()));
+        let err = child.stderr.take().map(|e| {
+            let keep = Arc::clone(&keep);
+            std::thread::spawn(move || pump(e, &keep))
+        });
+        if let Some(o) = child.stdout.take() {
+            pump(o, &keep);
+        }
+        if let Some(t) = err {
+            let _ = t.join();
+        }
+        let status = child.wait()?;
+        let code = status.code();
+        if code != Some(0) {
+            push(format!("(exited with {})", code.map_or("a signal".to_string(), |c| format!("code {c}"))));
+        }
+        let log = keep.lock().map(|k| k.clone()).unwrap_or_default();
+        Ok((code, log))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn streams_and_collects() {
+            let _ = drain();
+            let mut c = Command::new("sh");
+            c.args(["-c", "echo one; echo two >&2; printf '10%%\\r50%%\\r100%%\\n'; exit 3"]);
+            let (code, log) = stream(c, "test").unwrap();
+            assert_eq!(code, Some(3));
+            assert!(log.contains("one\n") && log.contains("two\n") && log.contains("100%\n"), "{log}");
+            let lines = drain();
+            // Other tests may run commands at the same time: check order, not position.
+            let at = |l: &str| lines.iter().position(|x| x == l);
+            assert!(at("$ test") < at("100%") && at("100%") < at("(exited with code 3)") && at("$ test").is_some(), "{lines:?}");
+            assert_eq!(shell_words(&["sh", "-c", "echo it's"]), "sh -c 'echo it'\\''s'");
+        }
+    }
 }
