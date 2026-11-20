@@ -241,7 +241,68 @@ fn buildable_kernels() -> Vec<String> {
     v
 }
 
-fn kernel_key(k: &str) -> Vec<u64> {
+/// Folders in /lib/modules left behind by kernels that are no longer
+/// installed. Deliberately strict: a folder is only listed when it is older
+/// than the running kernel, has no kernel image (in /boot or inside it), has
+/// a plain version name, and no installed package owns it. Returns full paths.
+pub(crate) fn leftover_module_dirs() -> Vec<String> {
+    let running = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string();
+    if running.is_empty() {
+        return Vec::new();
+    }
+    let Ok(rd) = std::fs::read_dir("/lib/modules") else { return Vec::new() };
+    let plain = |k: &str| {
+        k.starts_with(|c: char| c.is_ascii_digit())
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    };
+    let candidates: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) // never follow symlinks
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|k| plain(k) && *k != running && kernel_key(k) < kernel_key(&running))
+        .filter(|k| {
+            !Path::new(&format!("/boot/vmlinuz-{k}")).exists()
+                && !Path::new(&format!("/lib/modules/{k}/vmlinuz")).exists()
+                && !Path::new(&format!("/boot/{k}")).exists()
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    // Ask the package manager; check both /lib and /usr/lib spellings.
+    // Without a package manager to ask, list nothing.
+    let paths: Vec<String> = candidates
+        .iter()
+        .flat_map(|k| [format!("/lib/modules/{k}"), format!("/usr/lib/modules/{k}")])
+        .collect();
+    let args: Vec<&str> = paths.iter().map(String::as_str).collect();
+    // Paths some package owns. If the package manager can't be asked, list nothing.
+    let owned: BTreeSet<String> = if which("dpkg") {
+        // "pkg1, pkg2: /lib/modules/x" for owned paths; unowned ones only go to stderr.
+        let Ok(out) = run("dpkg", &[&["-S"][..], &args].concat(), &[1]) else { return Vec::new() };
+        out.lines().filter_map(|l| l.rsplit_once(": ")).map(|(_, p)| p.trim().to_string()).collect()
+    } else if which("pacman") {
+        // "/lib/modules/x is owned by pkg 1.0-1"
+        let Ok(out) = run("pacman", &[&["-Qo"][..], &args].concat(), &[1]) else { return Vec::new() };
+        out.lines().filter(|l| l.contains(" is owned by ")).filter_map(|l| l.split_whitespace().next()).map(String::from).collect()
+    } else if which("rpm") {
+        paths
+            .iter()
+            .filter(|p| std::process::Command::new("rpm").args(["-qf", p.as_str()]).output().is_ok_and(|o| o.status.success()))
+            .cloned()
+            .collect()
+    } else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<&String> = candidates
+        .iter()
+        .filter(|k| !owned.contains(&format!("/lib/modules/{k}")) && !owned.contains(&format!("/usr/lib/modules/{k}")))
+        .collect();
+    dirs.sort_by_key(|k| kernel_key(k)); // oldest first
+    dirs.into_iter().map(|k| format!("/lib/modules/{k}")).collect()
+}
+
+pub(crate) fn kernel_key(k: &str) -> Vec<u64> {
     k.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap_or(0)).collect()
 }
 

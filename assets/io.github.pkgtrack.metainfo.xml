@@ -67,6 +67,17 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.2" date="2026-11-19">
+      <description>
+        <ul>
+          <li>System scan on the Suggestions tab: unfinished installs, drivers that don't build for a new kernel, failed services, low disk space, pending restart, with one-click fixes</li>
+          <li>Cleanup of leftover kernel folders and of menu entries for deleted AppImages</li>
+          <li>Uninstalling an AppImage removes every menu entry, also those made by other tools</li>
+          <li>Bulk updates no longer fail when a snap is open; driver build failures are explained</li>
+          <li>A short notice on first launch about using the app at your own risk</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-18">
       <description>
         <ul>

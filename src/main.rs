@@ -396,6 +396,8 @@ enum Message {
     CloseAppUpdate,
     SkipAppUpdate,
     ToggleAppUpdateCheck(bool),
+    /// "I understand" on the first-launch disclaimer.
+    AcceptDisclaimer,
     /// Tick or untick a package for bulk update.
     ToggleChecked(Key, bool),
     /// Tick every shown package that has an update.
@@ -433,6 +435,8 @@ struct App {
     // --- new version of this app
     app_update: Option<update::Release>,
     app_update_check: bool,
+    /// Show the "use at your own risk" notice (until accepted once).
+    disclaimer: bool,
     // --- suggestions tab
     suggestions: Option<advice::Suggestions>,
     scanning: bool,
@@ -513,6 +517,7 @@ impl App {
             notify_on: startup::notify_enabled(),
             app_update: None,
             app_update_check: update::enabled(),
+            disclaimer: !update::disclaimer_accepted(),
             suggestions: None,
             scanning: false,
             pending: None,
@@ -864,6 +869,12 @@ impl App {
                 Err(e) => eprintln!("update check failed: {e}"),
             },
             Message::CloseAppUpdate => self.app_update = None,
+            Message::AcceptDisclaimer => {
+                self.disclaimer = false;
+                if let Err(e) = update::accept_disclaimer() {
+                    self.status = Some((false, format!("Couldn't save that you accepted the notice; it will show again next time: {e}")));
+                }
+            }
             Message::SkipAppUpdate => {
                 if let Some(rel) = self.app_update.take() {
                     if let Err(e) = update::skip(&rel.version) {
@@ -1223,6 +1234,8 @@ impl App {
         }
         .height(Length::Fill);
         let page: Element<Message> = match (&self.popup, &self.app_update) {
+            // First launch: nothing else until the risk notice is confirmed.
+            _ if self.disclaimer => modal(base.into(), self.disclaimer_view(), Message::Tick),
             (Some(key), _) => modal(base.into(), self.popup_view(key), Message::ClosePopup),
             (None, Some(rel)) => modal(base.into(), self.app_update_view(rel), Message::CloseAppUpdate),
             (None, None) => base.into(),
@@ -2612,6 +2625,32 @@ fn short_version(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disclaimer_shows_once() {
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join(format!("pkgtrack-disclaimer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let (mut app, _) = App::new();
+        assert!(app.disclaimer, "shown on first launch");
+        let _ = app.view();
+        let _ = app.update(Message::Tick);
+        assert!(app.disclaimer, "clicking outside doesn't dismiss it");
+        let _ = app.update(Message::AcceptDisclaimer);
+        assert!(!app.disclaimer && app.status.is_none());
+        let (again, _) = App::new();
+        assert!(!again.disclaimer, "not shown after accepting");
+        if let Some(h) = old_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn uninstall_from_suggestions_asks_inline() {

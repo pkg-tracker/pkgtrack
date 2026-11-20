@@ -171,6 +171,8 @@ pub enum ActionKind {
     /// Several steps in order; stops at the first failure.
     Many(Vec<ActionKind>),
     InstallAppImage(Box<crate::backends::appimage::Info>),
+    /// Delete leftover /lib/modules folders; each is checked again right before.
+    RemoveModuleDirs(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +223,10 @@ pub fn describe(kind: &ActionKind) -> String {
         }
         ActionKind::Notify(on) => format!("{} a daily systemd user timer", if *on { "Create" } else { "Remove" }),
         ActionKind::Many(steps) => steps.iter().map(describe).collect::<Vec<_>>().join("; then "),
+        ActionKind::RemoveModuleDirs(d) => format!(
+            "sudo rm -rf {} (each folder is checked again first: no installed kernel, no package owns it)",
+            d.join(" ")
+        ),
         ActionKind::InstallAppImage(i) => format!(
             "Move {} to ~/Applications and add {} to your app menu (no password needed)",
             std::path::Path::new(&i.staged).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -286,6 +292,23 @@ pub fn run_action(kind: &ActionKind) -> Result<String> {
         ActionKind::Autostart(file, on) => crate::startup::set_autostart(file, *on),
         ActionKind::Notify(on) => crate::startup::set_notify(*on),
         ActionKind::InstallAppImage(i) => crate::backends::appimage::install(i),
+        ActionKind::RemoveModuleDirs(dirs) => {
+            // The scan may be old: only remove what still passes every check now.
+            let now = crate::health::leftover_module_dirs();
+            let still: Vec<&str> = dirs.iter().filter(|d| now.contains(d)).map(String::as_str).collect();
+            if still.is_empty() {
+                bail!("Nothing was removed: none of these folders passes the safety checks any more.");
+            }
+            let mut argv = vec!["rm", "-rf", "--"];
+            argv.extend(&still);
+            run_privileged(&argv)?;
+            let skipped = dirs.len() - still.len();
+            Ok(format!(
+                "Removed {} leftover kernel folder(s).{}",
+                still.len(),
+                if skipped > 0 { format!(" {skipped} were kept because they're in use again.") } else { String::new() }
+            ))
+        }
         ActionKind::Many(steps) => {
             let mut last = String::new();
             for s in steps {
@@ -1092,6 +1115,71 @@ fn more_cleanup(cleanup: &mut Vec<Cleanup>, sources: &[Source]) {
                 }),
             });
         }
+    }
+    // Folders of kernels that were removed long ago.
+    let dirs = crate::health::leftover_module_dirs();
+    if !dirs.is_empty() {
+        let size: u64 = dirs.iter().map(|d| du_bytes(d)).sum();
+        cleanup.push(Cleanup {
+            title: "Folders of removed kernels".into(),
+            detail: "When a kernel is removed, drivers built for it (DKMS, VirtualBox, NVIDIA…) can leave its folder in \
+                     /lib/modules behind. These are only listed when they're older than the kernel you're running, have no \
+                     kernel installed for them, and no package owns them. They're checked again right before removal."
+                .into(),
+            items: dirs.clone(),
+            size: Some(size),
+            risk: Risk::Caution,
+            action: Some(Action {
+                label: "Remove old kernel folders".into(),
+                confirm: Some(format!(
+                    "Permanently delete {} folder(s) in /lib/modules ({})? They can't be restored from the Trash.",
+                    dirs.len(),
+                    crate::model::human_size(size)
+                )),
+                kind: ActionKind::RemoveModuleDirs(dirs),
+            }),
+        });
+    }
+    // Menu entries whose AppImage is gone.
+    let orphans = crate::backends::appimage::orphan_launchers();
+    let (mine, system): (Vec<_>, Vec<_>) = orphans.into_iter().partition(|o| o.user);
+    let describe_items = |v: &[crate::backends::appimage::OrphanLauncher]| -> Vec<String> {
+        v.iter().map(|o| format!("{} (was {})", o.name, o.missing)).collect()
+    };
+    if !mine.is_empty() {
+        cleanup.push(Cleanup {
+            title: "Menu entries for deleted AppImages".into(),
+            detail: "These app menu entries start AppImages that no longer exist, so clicking them does nothing. \
+                     This happens when an AppImage is deleted by hand or removed by another tool. \
+                     The entries are moved to the Trash, so you can restore them."
+                .into(),
+            items: describe_items(&mine),
+            size: None,
+            risk: Risk::Safe,
+            action: Some(Action {
+                label: "Move entries to Trash".into(),
+                confirm: Some(format!("Move {} menu entr{} to the Trash?", mine.len(), if mine.len() == 1 { "y" } else { "ies" })),
+                kind: ActionKind::Trash(mine.iter().map(|o| o.launcher.clone()).collect()),
+            }),
+        });
+    }
+    if !system.is_empty() {
+        let mut argv = vec!["rm".to_string(), "-f".into(), "--".into()];
+        argv.extend(system.iter().map(|o| o.launcher.clone()));
+        cleanup.push(Cleanup {
+            title: "Menu entries for deleted AppImages (all users)".into(),
+            detail: "These entries were installed for every user and start AppImages that no longer exist. \
+                     Removing them needs your password."
+                .into(),
+            items: describe_items(&system),
+            size: None,
+            risk: Risk::Safe,
+            action: Some(Action {
+                label: "Remove entries".into(),
+                confirm: Some(format!("Delete {} menu entr{} for all users?", system.len(), if system.len() == 1 { "y" } else { "ies" })),
+                kind: ActionKind::Root(argv),
+            }),
+        });
     }
     // Keep old snap revisions from piling up again.
     if sources.contains(&Source::Snap) {

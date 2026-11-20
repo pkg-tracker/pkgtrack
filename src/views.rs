@@ -697,6 +697,58 @@ fn popup_frame(content: Element<'_, Message>) -> Element<'_, Message> {
 
 impl App {
     /// "A new version of Package Tracker is available" popup.
+    /// Shown once, before first use: what the app can do, and that it's at your own risk.
+    pub(crate) fn disclaimer_view(&self) -> Element<'_, Message> {
+        let point = |t: &'static str| row![text("•").size(14), text(t).size(14)].spacing(8);
+        let col = Column::new()
+            .spacing(14)
+            .push(
+                column![
+                    text("Before you start").size(22).font(BOLD),
+                    muted("Package Tracker can change your system. Please read this once.".into()).size(14),
+                ]
+                .spacing(6),
+            )
+            .push(text(
+                "It can install, remove and update software, turn services off and run commands as administrator. \
+                 Its verdicts and suggestions come from heuristics and your package manager's data, and can be wrong for your system.",
+            ).size(14))
+            .push(
+                column![
+                    point("Every change shows its exact command and asks before it runs. Read it before you confirm."),
+                    point("Some changes can't be undone. Keep backups of anything important."),
+                    point("If you're not sure about a change, don't confirm it."),
+                ]
+                .spacing(6),
+            )
+            .push(
+                text(
+                    "You use Package Tracker at your own risk. It is provided \u{201c}as is\u{201d}, without warranty (MIT license), \
+                     and its authors are not responsible for any damage or data loss, whether by mistake or on purpose.",
+                )
+                .size(14)
+                .font(BOLD),
+            )
+            .push(
+                row![
+                    button(text("Read the full disclaimer").size(14))
+                        .padding([9, 16])
+                        .style(button::secondary)
+                        .on_press(Message::OpenUrl("https://github.com/pkg-tracker/pkgtrack#disclaimer".into()))
+                        .tip("Open the disclaimer on GitHub"),
+                    horizontal_space(),
+                    button(text("I understand").size(14))
+                        .padding([9, 16])
+                        .style(button::primary)
+                        .on_press(Message::AcceptDisclaimer)
+                        .tip("Don't show this again"),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        popup_frame(col.into())
+    }
+
     pub(crate) fn app_update_view<'a>(&'a self, rel: &'a crate::update::Release) -> Element<'a, Message> {
         let mut col = Column::new().spacing(14).push(
             column![
