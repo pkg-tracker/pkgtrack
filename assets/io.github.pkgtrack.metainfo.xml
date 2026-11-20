@@ -67,6 +67,14 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.5" date="2026-11-20">
+      <description>
+        <ul>
+          <li>An Output panel at the bottom shows the commands Package Tracker runs and what they print, live, with Copy for bug reports</li>
+          <li>AppImages without a version in their file name show their version, read from the app's own metadata</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-11-20">
       <description>
         <ul>

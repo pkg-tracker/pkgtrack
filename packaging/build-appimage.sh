@@ -19,6 +19,10 @@ cargo build --release
 install -Dm755 target/release/pkgtrack "$APPDIR/usr/bin/pkgtrack"
 install -Dm644 assets/$ID.desktop "$APPDIR/$ID.desktop"
 install -Dm644 assets/$ID.desktop "$APPDIR/usr/share/applications/$ID.desktop"
+# The file name has no version (so download links stay the same); record it
+# where app menus and AppImage tools look for it.
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+sed -i "/^\[Desktop Entry\]/a X-AppImage-Version=$VERSION" "$APPDIR/$ID.desktop" "$APPDIR/usr/share/applications/$ID.desktop"
 install -Dm644 assets/pkgtrack-256.png "$APPDIR/$ID.png"
 install -Dm644 assets/pkgtrack-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/$ID.png"
 install -Dm644 assets/$ID.metainfo.xml "$APPDIR/usr/share/metainfo/$ID.appdata.xml"
