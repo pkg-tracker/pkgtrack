@@ -1281,7 +1281,7 @@ impl App {
                     let help = match tab {
                         Tab::Installed => "Everything installed: details, updates and uninstall",
                         Tab::Install => "Search for new software and install it",
-                        Tab::Suggestions => "What to clean up, what's duplicated, and trackers to turn off",
+                        Tab::Suggestions => "Problems to fix, what to clean up, what's duplicated, and trackers to turn off",
                         Tab::Network => "Which programs are talking to the internet right now",
                         Tab::Startup => "Services and apps that start automatically",
                         Tab::Sources => "Repositories your software comes from",
@@ -1919,7 +1919,7 @@ impl App {
         let header = row![
             column![
                 text("Suggestions").size(24).font(BOLD),
-                muted("What to clean up, what's duplicated, what's safe to remove, and how to stop tracking.".into()).size(13),
+                muted("Problems to fix, what to clean up, what's duplicated, what's safe to remove, and how to stop tracking.".into()).size(13),
             ]
             .spacing(2)
             .width(Length::Fill),
