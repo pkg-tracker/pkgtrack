@@ -67,6 +67,16 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.4" date="2026-11-20">
+      <description>
+        <ul>
+          <li>Apps installed by hand (install scripts, tarballs, make install) are listed, and count as duplicates of the same app from another source</li>
+          <li>Two AppImages of one app are shown as duplicates</li>
+          <li>Installing a new version of an AppImage replaces the old one instead of leaving two</li>
+          <li>An About window: version, build date and commit, what the app does, and links to the project</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.3" date="2026-11-20">
       <description>
         <ul>

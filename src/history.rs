@@ -469,7 +469,7 @@ pub fn plan_import(path: &str, installed: &[Package], sources: &[Source]) -> Res
             Source::Pacman => root_script.push(format!("pacman -S --needed --noconfirm {}", list.join(" "))),
             Source::Rpm if which("dnf") => root_script.push(format!("dnf install -y {}", list.join(" "))),
             Source::Rpm => root_script.push(format!("zypper -n install {}", list.join(" "))),
-            Source::AppImage => {}
+            Source::AppImage | Source::Manual => {}
             Source::Snap => {
                 for n in list {
                     root_script.push(format!("snap install {n}{}", if classic.contains(n) { " --classic" } else { "" }));

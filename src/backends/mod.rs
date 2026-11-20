@@ -1,5 +1,6 @@
 pub mod appimage;
 mod apt;
+pub mod manual;
 pub mod flatpak;
 mod pacman;
 mod rpm;
@@ -36,6 +37,7 @@ pub fn detect() -> Vec<Source> {
         v.push(Source::Snap);
     }
     v.push(Source::AppImage);
+    v.push(Source::Manual);
     v
 }
 
@@ -117,6 +119,7 @@ pub fn list(src: Source) -> Result<Vec<Package>> {
         Source::Flatpak => flatpak::list(),
         Source::Snap => snap::list(),
         Source::AppImage => appimage::list(),
+        Source::Manual => manual::list(),
     }
 }
 
@@ -128,7 +131,7 @@ pub fn updates(src: Source) -> Result<HashMap<String, String>> {
         Source::Pacman => pacman::updates(),
         Source::Flatpak => flatpak::updates(),
         Source::Snap => snap::updates(),
-        Source::AppImage => Ok(HashMap::new()),
+        Source::AppImage | Source::Manual => Ok(HashMap::new()),
     }
 }
 
@@ -140,6 +143,7 @@ pub fn details(pkg: &Package) -> Details {
         Source::Flatpak => flatpak::details(pkg),
         Source::Snap => snap::details(pkg),
         Source::AppImage => appimage::details(pkg),
+        Source::Manual => manual::details(pkg),
     };
     if matches!(pkg.source, Source::Rpm | Source::Pacman) && pkg.kind == crate::model::Kind::App {
         if let Some((desc, home)) = crate::appstream::from_files(&native_files(pkg)) {
@@ -170,6 +174,7 @@ pub fn remove(pkg: &Package) -> Result<String> {
         Source::Flatpak => flatpak::remove(pkg),
         Source::Snap => run_privileged(&["snap", "remove", &pkg.id]),
         Source::AppImage => appimage::remove(pkg),
+        Source::Manual => manual::remove(pkg),
     }
 }
 
@@ -188,6 +193,7 @@ pub fn update(pkg: &Package) -> Result<String> {
         Source::Pacman => run_privileged(&["pacman", "-Syu", "--noconfirm"]),
         Source::Flatpak => flatpak::update(pkg),
         Source::AppImage => anyhow::bail!("AppImages are updated by downloading a new version from the app's website."),
+        Source::Manual => anyhow::bail!("Apps installed by hand are updated the same way they were installed."),
         Source::Snap => run_privileged(&["snap", "refresh", &pkg.id]).map_err(|e| {
             if e.to_string().contains("has running apps") {
                 anyhow::anyhow!(

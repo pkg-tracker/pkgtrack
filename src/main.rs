@@ -366,6 +366,8 @@ enum Message {
     /// Animation frame (only subscribed while something is loading).
     Tick,
     OpenUrl(String),
+    ShowAbout,
+    CloseAbout,
     AppImagePath(String),
     BrowseAppImage,
     InspectAppImage,
@@ -437,6 +439,8 @@ struct App {
     app_update_check: bool,
     /// Show the "use at your own risk" notice (until accepted once).
     disclaimer: bool,
+    /// The About window is open.
+    about: bool,
     // --- suggestions tab
     suggestions: Option<advice::Suggestions>,
     scanning: bool,
@@ -518,6 +522,7 @@ impl App {
             app_update: None,
             app_update_check: update::enabled(),
             disclaimer: !update::disclaimer_accepted(),
+            about: false,
             suggestions: None,
             scanning: false,
             pending: None,
@@ -613,7 +618,12 @@ impl App {
         if self.animating() {
             subs.push(iced::window::frames().map(|_| Message::Tick));
         }
-        if self.popup.is_some() {
+        if self.about {
+            subs.push(iced::keyboard::on_key_press(|key, _| match key {
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::CloseAbout),
+                _ => None,
+            }));
+        } else if self.popup.is_some() {
             subs.push(iced::keyboard::on_key_press(|key, _| match key {
                 iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::ClosePopup),
                 _ => None,
@@ -869,6 +879,8 @@ impl App {
                 Err(e) => eprintln!("update check failed: {e}"),
             },
             Message::CloseAppUpdate => self.app_update = None,
+            Message::ShowAbout => self.about = true,
+            Message::CloseAbout => self.about = false,
             Message::AcceptDisclaimer => {
                 self.disclaimer = false;
                 if let Err(e) = update::accept_disclaimer() {
@@ -1236,6 +1248,7 @@ impl App {
         let page: Element<Message> = match (&self.popup, &self.app_update) {
             // First launch: nothing else until the risk notice is confirmed.
             _ if self.disclaimer => modal(base.into(), self.disclaimer_view(), Message::Tick),
+            _ if self.about => modal(base.into(), self.about_view(), Message::CloseAbout),
             (Some(key), _) => modal(base.into(), self.popup_view(key), Message::ClosePopup),
             (None, Some(rel)) => modal(base.into(), self.app_update_view(rel), Message::CloseAppUpdate),
             (None, None) => base.into(),
@@ -1381,6 +1394,13 @@ impl App {
     }
 
     fn sidebar_frame<'a>(&'a self, col: Column<'a, Message>) -> Element<'a, Message> {
+        let col = col.push(
+            button(text("About").size(13))
+                .on_press(Message::ShowAbout)
+                .style(button::secondary)
+                .width(Length::Fill)
+                .tip("Version, who makes Package Tracker, and what it does"),
+        );
         let col = col.push(
             button(text(if self.dark { "Light theme" } else { "Dark theme" }).size(13))
                 .on_press(Message::ToggleTheme)
