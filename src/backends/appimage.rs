@@ -359,6 +359,56 @@ fn launchers_for(targets: &[String]) -> Vec<(PathBuf, BTreeMap<String, String>)>
         .collect()
 }
 
+/// A launcher whose AppImage is gone (deleted or moved by hand, or left
+/// behind by an older uninstall).
+#[derive(Debug, Clone)]
+pub struct OrphanLauncher {
+    pub launcher: String,
+    pub name: String,
+    pub missing: String,
+    /// In the user's home folder (no password needed to remove).
+    pub user: bool,
+}
+
+/// Launchers that point to an AppImage that no longer exists. To avoid
+/// false alarms, the folder it was in must still exist (so it isn't just an
+/// unplugged drive), and the target must clearly be an AppImage: our marker,
+/// an .AppImage name, or X-AppImage-* keys written by integration tools.
+pub fn orphan_launchers() -> Vec<OrphanLauncher> {
+    let h = home();
+    launcher_files()
+        .into_iter()
+        .filter_map(|p| {
+            let raw = std::fs::read_to_string(&p).ok()?;
+            let f = parse_desktop(&raw);
+            let exec_prog = || -> Option<String> {
+                let exec = f.get("Exec")?;
+                let mut parts = exec.split_whitespace().skip_while(|p| *p == "env" || p.contains('='));
+                Some(parts.next()?.trim_matches('"').trim_matches('\'').to_string())
+            };
+            let target = f.get(MARK).cloned().or_else(|| {
+                let prog = exec_prog()?;
+                let tagged = f.keys().any(|k| k.starts_with("X-AppImage"));
+                (prog.to_lowercase().ends_with(".appimage") || tagged).then_some(prog)
+            })?;
+            if !target.starts_with('/') || std::fs::symlink_metadata(&target).is_ok() {
+                return None;
+            }
+            let parent = Path::new(&target).parent()?;
+            if !parent.is_dir() {
+                return None; // drive not mounted, or a whole folder moved: don't guess
+            }
+            let launcher = p.to_string_lossy().into_owned();
+            Some(OrphanLauncher {
+                name: f.get("Name").cloned().unwrap_or_else(|| p.file_stem().unwrap_or_default().to_string_lossy().into_owned()),
+                user: launcher.starts_with(&h),
+                launcher,
+                missing: target,
+            })
+        })
+        .collect()
+}
+
 /// AppImages added to the app menu (by us or any other tool), plus loose
 /// ones in ~/Applications.
 pub fn list() -> Result<Vec<Package>> {
@@ -651,6 +701,48 @@ mod tests {
         assert!(Path::new(&other).exists(), "unrelated launchers are kept");
         assert!(list().unwrap().is_empty());
 
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("XDG_DATA_DIRS");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn finds_launchers_of_deleted_appimages() {
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("pkgtrack-orphans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let h = home.to_string_lossy().into_owned();
+        let menu = format!("{h}/.local/share/applications");
+        std::fs::create_dir_all(&menu).unwrap();
+        std::fs::create_dir_all(format!("{h}/Applications")).unwrap();
+        let alive = format!("{h}/Applications/Alive.AppImage");
+        std::fs::write(&alive, b"\x7fELF\x02\x01\x01\x00AI\x02x").unwrap();
+        let entry = |name: &str, exec: &str| format!("[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\n");
+        // Deleted by hand: folder exists, file doesn't.
+        std::fs::write(format!("{menu}/gone.desktop"), entry("Gone", &format!("{h}/Applications/Gone.AppImage %U"))).unwrap();
+        // Renamed by an integrator (no extension), tagged with X-AppImage keys.
+        std::fs::write(
+            format!("{menu}/tagged.desktop"),
+            entry("Tagged", &format!("\"{h}/Applications/tagged-app\"")) + "X-AppImage-Version=1.0\n",
+        )
+        .unwrap();
+        // Unplugged drive: the whole folder is missing, so don't touch it.
+        std::fs::write(format!("{menu}/usb.desktop"), entry("Usb", "/media/nobody/usb/App.AppImage")).unwrap();
+        // Still there, and an ordinary program.
+        std::fs::write(format!("{menu}/alive.desktop"), entry("Alive", &alive)).unwrap();
+        std::fs::write(format!("{menu}/normal.desktop"), entry("Normal", "/usr/bin/true")).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", format!("{h}/.local/share"));
+            std::env::set_var("XDG_CONFIG_HOME", format!("{h}/.config"));
+            std::env::set_var("XDG_DATA_DIRS", format!("{h}/no-system"));
+        }
+        let mut names: Vec<String> = orphan_launchers().into_iter().inspect(|o| assert!(o.user)).map(|o| o.name).collect();
+        names.sort();
+        assert_eq!(names, ["Gone", "Tagged"]);
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
             std::env::remove_var("XDG_CONFIG_HOME");
