@@ -269,6 +269,16 @@ pub fn install(info: &Info) -> Result<String> {
     Ok(format!("{} was installed and added to your app menu.", info.name))
 }
 
+/// Is this file an AppImage (by its magic bytes, whatever its name)?
+fn is_appimage(path: &str) -> bool {
+    appimage_type(path).is_ok()
+}
+
+/// Real path of a file (follows symlinks); the path itself if that fails.
+fn canonical(path: &str) -> String {
+    std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string())
+}
+
 /// Path of the AppImage a desktop file launches, if any.
 fn appimage_of(fields: &BTreeMap<String, String>) -> Option<String> {
     if let Some(p) = fields.get(MARK) {
@@ -276,55 +286,133 @@ fn appimage_of(fields: &BTreeMap<String, String>) -> Option<String> {
     }
     let exec = fields.get("Exec")?;
     let mut parts = exec.split_whitespace().skip_while(|p| *p == "env" || p.contains('='));
-    let prog = parts.next()?.trim_matches('"').to_string();
-    prog.to_lowercase().ends_with(".appimage").then_some(prog)
+    let prog = parts.next()?.trim_matches('"').trim_matches('\'').to_string();
+    if prog.to_lowercase().ends_with(".appimage") {
+        return Some(prog);
+    }
+    // Integration tools often rename the file (no extension): check its signature.
+    (prog.starts_with('/') && Path::new(&prog).is_file() && is_appimage(&prog)).then_some(prog)
 }
 
-/// AppImages added to the app menu, plus loose ones in ~/Applications.
-pub fn list() -> Result<Vec<Package>> {
-    let mut v: Vec<Package> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(desktop_dir()) {
+/// Every folder launchers can live in: the app menu (user and system),
+/// login apps and the desktop.
+fn launcher_dirs() -> Vec<PathBuf> {
+    let h = home();
+    let data_home = std::env::var("XDG_DATA_HOME").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| format!("{h}/.local/share"));
+    let data_dirs = std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    let mut dirs: Vec<PathBuf> = vec![PathBuf::from(format!("{data_home}/applications"))];
+    dirs.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(|d| PathBuf::from(format!("{d}/applications"))));
+    let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| format!("{h}/.config"));
+    dirs.push(PathBuf::from(format!("{config}/autostart")));
+    let desktop = crate::backends::run("xdg-user-dir", &["DESKTOP"], &[])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && *s != h)
+        .unwrap_or_else(|| format!("{h}/Desktop"));
+    dirs.push(PathBuf::from(desktop));
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| d.is_dir() && seen.insert(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())));
+    dirs
+}
+
+/// All .desktop files in the launcher folders (and their subfolders).
+fn launcher_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().is_none_or(|x| x != "desktop") {
-                continue;
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() && depth > 0 {
+                walk(&p, depth - 1, out);
+            } else if p.extension().is_some_and(|x| x == "desktop") {
+                out.push(p);
             }
-            let Ok(raw) = std::fs::read_to_string(&p) else { continue };
-            let f = parse_desktop(&raw);
-            let Some(img) = appimage_of(&f) else { continue };
-            if !Path::new(&img).exists() || v.iter().any(|x| x.id == img) {
-                continue;
-            }
-            let file = Path::new(&img).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            v.push(Package {
-                name: f.get("Name").cloned().unwrap_or_else(|| file.clone()),
-                version: f.get("X-AppImage-Version").cloned().unwrap_or_else(|| version_from_filename(&file)),
-                source: Source::AppImage,
-                summary: f.get("Comment").cloned().unwrap_or_default(),
-                size_bytes: std::fs::metadata(&img).ok().map(|m| m.len()),
-                kind: Kind::App,
-                protected: false,
-                extra: p.to_string_lossy().into_owned(),
-                new_version: None,
-                telemetry: None,
-                installed_at: birth_time(&img),
-                id: img,
-            });
         }
+    }
+    let mut v = Vec::new();
+    for d in launcher_dirs() {
+        walk(&d, 3, &mut v);
+    }
+    v
+}
+
+/// Does `text` contain `path` as a whole path (not as the start of a longer name)?
+fn mentions_path(text: &str, path: &str) -> bool {
+    text.match_indices(path).any(|(i, _)| {
+        let next = text[i + path.len()..].chars().next();
+        !next.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '/'))
+    })
+}
+
+/// Launchers that start the AppImage at any of `targets` (paths, canonical or not).
+fn launchers_for(targets: &[String]) -> Vec<(PathBuf, BTreeMap<String, String>)> {
+    launcher_files()
+        .into_iter()
+        .filter_map(|p| {
+            let raw = std::fs::read_to_string(&p).ok()?;
+            let f = parse_desktop(&raw);
+            let hit = appimage_of(&f).is_some_and(|img| targets.contains(&img) || targets.contains(&canonical(&img)))
+                // Wrappers like `sh -c "… /path/App.AppImage"` or `appimage-run /path/…`.
+                || ["Exec", "TryExec"].iter().any(|k| f.get(*k).is_some_and(|v| targets.iter().any(|t| mentions_path(v, t))));
+            hit.then_some((p, f))
+        })
+        .collect()
+}
+
+/// AppImages added to the app menu (by us or any other tool), plus loose
+/// ones in ~/Applications.
+pub fn list() -> Result<Vec<Package>> {
+    let mut v: Vec<Package> = Vec::new();
+    // The user's app menu folder comes first, so its names win.
+    for p in launcher_files() {
+        let Ok(raw) = std::fs::read_to_string(&p) else { continue };
+        let f = parse_desktop(&raw);
+        let Some(img) = appimage_of(&f) else { continue };
+        if !Path::new(&img).exists() {
+            continue;
+        }
+        let real = canonical(&img);
+        let launcher = p.to_string_lossy().into_owned();
+        // Same app from several launchers: one entry, remember every launcher.
+        if let Some(x) = v.iter_mut().find(|x| canonical(&x.id) == real) {
+            x.extra.push('\t');
+            x.extra.push_str(&launcher);
+            continue;
+        }
+        let file = Path::new(&img).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        v.push(Package {
+            name: f.get("Name").cloned().unwrap_or_else(|| file.clone()),
+            version: f.get("X-AppImage-Version").cloned().unwrap_or_else(|| version_from_filename(&file)),
+            source: Source::AppImage,
+            summary: f.get("Comment").cloned().unwrap_or_default(),
+            size_bytes: std::fs::metadata(&real).ok().map(|m| m.len()),
+            kind: Kind::App,
+            protected: false,
+            extra: launcher,
+            new_version: None,
+            telemetry: None,
+            installed_at: birth_time(&img),
+            id: img,
+        });
     }
     if let Ok(rd) = std::fs::read_dir(apps_dir()) {
         for e in rd.flatten() {
             let img = e.path().to_string_lossy().into_owned();
-            if !img.to_lowercase().ends_with(".appimage") || v.iter().any(|x| x.id == img) {
+            let named = img.to_lowercase().ends_with(".appimage");
+            if !(named || (e.path().is_file() && is_appimage(&img))) {
+                continue;
+            }
+            let real = canonical(&img);
+            if v.iter().any(|x| x.id == img || canonical(&x.id) == real) {
                 continue;
             }
             let file = e.file_name().to_string_lossy().into_owned();
             v.push(Package {
-                name: file.trim_end_matches(".AppImage").to_string(),
+                name: file.trim_end_matches(".AppImage").trim_end_matches(".appimage").to_string(),
                 version: version_from_filename(&file),
                 source: Source::AppImage,
                 summary: "Not in the app menu".into(),
-                size_bytes: e.metadata().ok().map(|m| m.len()),
+                size_bytes: std::fs::metadata(&real).ok().map(|m| m.len()),
                 kind: Kind::App,
                 protected: false,
                 extra: String::new(),
@@ -341,9 +429,11 @@ pub fn list() -> Result<Vec<Package>> {
 pub fn details(pkg: &Package) -> Details {
     let mut d = Details::default();
     d.location.push(pkg.id.clone());
-    if !pkg.extra.is_empty() {
-        d.location.push(pkg.extra.clone());
+    let real = canonical(&pkg.id);
+    if real != pkg.id {
+        d.location.push(real);
     }
+    d.location.extend(pkg.extra.split('\t').filter(|l| !l.is_empty()).map(String::from));
     // AppImages run from a temporary mount; the runtime exports $APPIMAGE.
     let needle = format!("APPIMAGE={}", pkg.id);
     d.running = crate::procs::running_matching(|exe, _| exe.starts_with("/tmp/.mount_") || exe == pkg.id)
@@ -359,25 +449,133 @@ pub fn details(pkg: &Package) -> Details {
     d
 }
 
-pub fn remove(pkg: &Package) -> Result<String> {
-    let trashed = Command::new("gio").args(["trash", &pkg.id]).status().map(|s| s.success()).unwrap_or(false);
-    if !trashed {
-        std::fs::remove_file(&pkg.id).with_context(|| format!("could not remove {}", pkg.id))?;
+/// Icons an integration tool made for this launcher (never shared theme icons).
+fn own_icons(icon: &str) -> Vec<PathBuf> {
+    let h = home();
+    let user_icons = format!("{h}/.local/share/icons");
+    if icon.starts_with('/') {
+        // Only files in the user's icon folders, never system or theme files.
+        return if icon.starts_with(&user_icons) { vec![PathBuf::from(icon)] } else { Vec::new() };
     }
-    if !pkg.extra.is_empty() {
-        if let Ok(raw) = std::fs::read_to_string(&pkg.extra) {
-            // Remove the icon only if we created it.
-            if let Some(icon) = parse_desktop(&raw).get("Icon").filter(|i| i.starts_with(&icon_dir())) {
-                let _ = std::fs::remove_file(icon);
+    // AppImageLauncher / appimaged name them "appimagekit_<hash>…".
+    if !icon.starts_with("appimagekit_") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    fn walk(dir: &Path, name: &str, depth: u8, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() && depth > 0 {
+                walk(&p, name, depth - 1, out);
+            } else if p.file_stem().is_some_and(|s| s == name) {
+                out.push(p);
             }
         }
-        let _ = std::fs::remove_file(&pkg.extra);
-        let _ = Command::new("update-desktop-database").arg(desktop_dir()).output();
+    }
+    walk(Path::new(&user_icons), icon, 5, &mut out);
+    out
+}
+
+/// Ask the desktop to reload its app menu.
+fn refresh_menus(dirs: &std::collections::BTreeSet<PathBuf>) {
+    for d in dirs {
+        let _ = Command::new("update-desktop-database").arg(d).output();
+    }
+    for kde in ["kbuildsycoca6", "kbuildsycoca5"] {
+        if crate::backends::which(kde) {
+            let _ = Command::new(kde).arg("--noincremental").output();
+            break;
+        }
+    }
+    let _ = Command::new("gtk-update-icon-cache").args(["-q", "-t", &format!("{}/.local/share/icons/hicolor", home())]).output();
+}
+
+pub fn remove(pkg: &Package) -> Result<String> {
+    let real = canonical(&pkg.id);
+    let targets: Vec<String> = [pkg.id.clone(), real.clone()].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    // Find every launcher first, while the file still exists.
+    let mut launchers = launchers_for(&targets);
+    for l in pkg.extra.split('\t').filter(|l| !l.is_empty()) {
+        if !launchers.iter().any(|(p, _)| p == Path::new(l)) {
+            if let Ok(raw) = std::fs::read_to_string(l) {
+                launchers.push((PathBuf::from(l), parse_desktop(&raw)));
+            }
+        }
+    }
+
+    // The app itself, plus every symlink pointing to it (in ~/Applications
+    // or used by a launcher). Links are just deleted; the AppImage goes to the Trash.
+    let mut aliases: std::collections::BTreeSet<String> = launchers.iter().filter_map(|(_, f)| appimage_of(f)).collect();
+    aliases.insert(pkg.id.clone());
+    if let Ok(rd) = std::fs::read_dir(apps_dir()) {
+        aliases.extend(rd.flatten().map(|e| e.path().to_string_lossy().into_owned()));
+    }
+    for a in &aliases {
+        let link = std::fs::symlink_metadata(a).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        if link && *a != real && canonical(a) == real {
+            let _ = std::fs::remove_file(a);
+        }
+    }
+    let trash = |path: &str| -> Result<bool> {
+        if Command::new("gio").args(["trash", path]).status().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+        std::fs::remove_file(path).with_context(|| format!("could not remove {path}"))?;
+        Ok(false)
+    };
+    // Only trash the target of a link if it really is an AppImage.
+    let trashed = if real == pkg.id || (Path::new(&real).is_file() && is_appimage(&real)) {
+        trash(&real)?
+    } else {
+        false
+    };
+
+    // Launchers (and the icons made for them).
+    let mut removed = 0;
+    let mut touched = std::collections::BTreeSet::new();
+    let mut system: Vec<String> = Vec::new();
+    for (path, f) in &launchers {
+        if let Some(icon) = f.get("Icon") {
+            for i in own_icons(icon) {
+                let _ = std::fs::remove_file(i);
+            }
+        }
+        if let Some(d) = path.parent() {
+            touched.insert(d.to_path_buf());
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => system.push(path.to_string_lossy().into_owned()),
+            Err(_) => {}
+        }
+    }
+    let mut note = String::new();
+    if !system.is_empty() {
+        // Installed for all users: one password prompt removes them.
+        let mut argv = vec!["rm", "-f", "--"];
+        argv.extend(system.iter().map(String::as_str));
+        match crate::backends::run_privileged(&argv) {
+            Ok(_) => removed += system.len(),
+            Err(e) => note = format!(" Some menu entries for all users were not removed ({e}): {}.", system.join(", ")),
+        }
+    }
+    refresh_menus(&touched);
+
+    // Anything left that still points to it?
+    let left: Vec<String> = launchers_for(&targets).into_iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
+    if note.is_empty() && !left.is_empty() {
+        note = format!(" These menu entries still point to it: {}.", left.join(", "));
     }
     Ok(format!(
-        "{} was removed{}. Its settings in your home folder were kept.",
+        "{} was removed{}{}. Its settings in your home folder were kept.{note}",
         pkg.name,
-        if trashed { " (the AppImage file is in the Trash)" } else { "" }
+        if trashed { " (the AppImage file is in the Trash)" } else { "" },
+        match removed {
+            0 => String::new(),
+            1 => ", with its menu entry".into(),
+            n => format!(", with its {n} menu entries"),
+        },
     ))
 }
 
@@ -393,5 +591,71 @@ mod tests {
         let f = parse_desktop("[Desktop Entry]\nName=X\nExec=env FOO=1 \"/home/u/Applications/X.AppImage\" %U\n");
         assert_eq!(appimage_of(&f).as_deref(), Some("/home/u/Applications/X.AppImage"));
         assert!(appimage_type("/bin/sh").is_err());
+    }
+
+    #[test]
+    fn path_matching() {
+        assert!(mentions_path("sh -c '/opt/apps/foo --x'", "/opt/apps/foo"));
+        assert!(mentions_path("\"/opt/apps/foo\" %U", "/opt/apps/foo"));
+        assert!(!mentions_path("/opt/apps/foo2 %U", "/opt/apps/foo"));
+        assert!(!mentions_path("/opt/apps/foo.AppImage", "/opt/apps/foo"));
+    }
+
+    /// A third-party integrator: renamed AppImage (no extension) kept in its
+    /// own folder, a symlink in ~/Applications, and launchers in a menu
+    /// subfolder, autostart and on the desktop. Uninstall must remove all.
+    #[test]
+    fn uninstall_removes_every_launcher() {
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("pkgtrack-appimage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let h = home.to_string_lossy().into_owned();
+        let store = format!("{h}/.local/lib/myintegrator");
+        let menu_sub = format!("{h}/.local/share/applications/myintegrator");
+        let auto = format!("{h}/.config/autostart");
+        let desk = format!("{h}/Desktop");
+        let icons = format!("{h}/.local/share/icons/hicolor/64x64/apps");
+        for d in [&store, &menu_sub, &auto, &desk, &icons, &format!("{h}/Applications")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let real = format!("{store}/coolapp");
+        std::fs::write(&real, b"\x7fELF\x02\x01\x01\x00AI\x02rest-of-file").unwrap();
+        let link = format!("{h}/Applications/CoolApp.AppImage");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let icon = format!("{icons}/appimagekit_abc123_coolapp.png");
+        std::fs::write(&icon, b"png").unwrap();
+        let entry = |exec: &str| format!("[Desktop Entry]\nType=Application\nName=Cool App\nExec={exec}\nIcon=appimagekit_abc123_coolapp\n");
+        std::fs::write(format!("{menu_sub}/coolapp.desktop"), entry(&format!("{real} %U"))).unwrap();
+        std::fs::write(format!("{auto}/coolapp.desktop"), entry(&format!("sh -c '{real} --tray'"))).unwrap();
+        std::fs::write(format!("{desk}/Cool App.desktop"), entry(&format!("\"{link}\""))).unwrap();
+        let other = format!("{h}/.local/share/applications/other.desktop");
+        std::fs::write(&other, entry("/usr/bin/true")).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", format!("{h}/.local/share"));
+            std::env::set_var("XDG_CONFIG_HOME", format!("{h}/.config"));
+            std::env::set_var("XDG_DATA_DIRS", format!("{h}/no-system"));
+        }
+
+        let pkgs = list().unwrap();
+        assert_eq!(pkgs.len(), 1, "one app, not one per launcher: {pkgs:?}");
+        let p = &pkgs[0];
+        assert_eq!(p.name, "Cool App");
+        assert_eq!(p.extra.split('\t').count(), 2, "menu + desktop launchers recorded: {}", p.extra);
+
+        let msg = remove(p).unwrap();
+        assert!(msg.contains("3 menu entries"), "{msg}");
+        assert!(!Path::new(&link).exists() && std::fs::symlink_metadata(&link).is_err());
+        assert!(!Path::new(&real).exists(), "the real AppImage behind the symlink is removed too");
+        assert!(!Path::new(&icon).exists());
+        assert!(Path::new(&other).exists(), "unrelated launchers are kept");
+        assert!(list().unwrap().is_empty());
+
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("XDG_DATA_DIRS");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

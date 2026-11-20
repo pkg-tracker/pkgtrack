@@ -339,29 +339,28 @@ fn env_opt_out(var: &str) -> Result<String> {
 /// One action that updates everything (one password prompt for root steps).
 pub fn update_all_action(pkgs: &[Package]) -> Option<Action> {
     let count = |s: Source| pkgs.iter().filter(|p| p.source == s && p.new_version.is_some()).count();
-    let mut root = Vec::new();
+    let mut root: Vec<String> = Vec::new();
     let mut steps = Vec::new();
     let mut parts = Vec::new();
     if count(Source::Apt) > 0 {
-        root.push("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold");
+        root.push("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold".into());
         parts.push(format!("{} deb", count(Source::Apt)));
     }
     if count(Source::Rpm) > 0 {
-        root.push(if which("dnf") { "dnf upgrade -y" } else { "zypper -n update" });
+        root.push(if which("dnf") { "dnf upgrade -y" } else { "zypper -n update" }.into());
         parts.push(format!("{} rpm", count(Source::Rpm)));
     }
     if count(Source::Pacman) > 0 {
-        root.push("pacman -Syu --noconfirm");
+        root.push("pacman -Syu --noconfirm".into());
         parts.push(format!("{} pacman", count(Source::Pacman)));
     }
     if count(Source::Snap) > 0 {
-        // Running snaps are postponed by snapd; that is not an error for us.
-        root.push("snap refresh");
+        let snaps: Vec<&Package> = pkgs.iter().filter(|p| p.source == Source::Snap && p.new_version.is_some()).collect();
+        root.push(snap_refresh_script(&snaps));
         parts.push(format!("{} snap", count(Source::Snap)));
     }
     if !root.is_empty() {
-        let script = format!("rc=0; {}; exit $rc", root.iter().map(|c| format!("{c} || rc=1")).collect::<Vec<_>>().join("; "));
-        steps.push(ActionKind::RootScript(script));
+        steps.push(ActionKind::RootScript(root_script(&root)));
     }
     if count(Source::Flatpak) > 0 {
         steps.push(ActionKind::User(["flatpak", "update", "-y", "--noninteractive"].map(String::from).to_vec()));
@@ -378,6 +377,32 @@ pub fn update_all_action(pkgs: &[Package]) -> Option<Action> {
         )),
         kind: ActionKind::Many(steps),
     })
+}
+
+/// Runs each command even if an earlier one fails; exits 1 if any failed.
+/// Commands that handle their own failures (see `snap_refresh_script`) end in `:`.
+fn root_script<S: AsRef<str>>(cmds: &[S]) -> String {
+    let body = cmds
+        .iter()
+        .map(|c| {
+            let c = c.as_ref();
+            if c.ends_with(':') { c.to_string() } else { format!("{c} || rc=1") }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("rc=0; {body}; exit $rc")
+}
+
+/// Refresh snaps one at a time: snapd refuses the whole batch when one of
+/// them is running, and a running snap isn't an error (snapd updates it
+/// once it's closed).
+fn snap_refresh_script(snaps: &[&Package]) -> String {
+    let names = snaps.iter().map(|p| sh_quote(&p.id)).collect::<Vec<_>>().join(" ");
+    format!(
+        "for s in {names}; do o=$(snap refresh \"$s\" 2>&1) || case \"$o\" in \
+         *'has running apps'*) echo \"$s is open; it updates once you close it.\";; \
+         *) echo \"$o\"; rc=1;; esac; done; :"
+    )
 }
 
 /// Single-quote a word for `sh -c`.
@@ -418,13 +443,12 @@ pub fn update_selected_action(pkgs: &[&Package]) -> Option<Action> {
     }
     let snap = pick(Source::Snap);
     if !snap.is_empty() {
-        root.push(format!("snap refresh {}", ids(&snap)));
+        root.push(snap_refresh_script(&snap));
         parts.push(format!("{} snap", snap.len()));
         notes.push("Snaps that are running are updated once you close them.");
     }
     if !root.is_empty() {
-        let script = format!("rc=0; {}; exit $rc", root.iter().map(|c| format!("{c} || rc=1")).collect::<Vec<_>>().join("; "));
-        steps.push(ActionKind::RootScript(script));
+        steps.push(ActionKind::RootScript(root_script(&root)));
     }
     let flatpak = pick(Source::Flatpak);
     if !flatpak.is_empty() {
@@ -507,6 +531,8 @@ pub struct Suggestions {
     pub telemetry: Vec<TelemetryGroup>,
     pub duplicates: Vec<DupGroup>,
     pub cleanup: Vec<Cleanup>,
+    /// System problems (broken installs, drivers, failed services, disk space…).
+    pub issues: Vec<crate::health::Issue>,
 }
 
 /// Names used to spot the same app installed from different sources.
@@ -606,6 +632,11 @@ fn details_parallel(pkgs: &[Package]) -> Vec<Details> {
 }
 
 pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
+    // Health checks only run small read-only commands; do them alongside.
+    let health = {
+        let sources = sources.clone();
+        std::thread::spawn(move || crate::health::check(&sources))
+    };
     let dup_groups = find_duplicates(&all);
     let dup_ids: HashSet<(Source, String)> =
         dup_groups.iter().flatten().map(|p| (p.source, p.id.clone())).collect();
@@ -949,7 +980,8 @@ pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
     }
 
     more_cleanup(&mut cleanup, &sources);
-    Suggestions { unused, telemetry, duplicates, cleanup }
+    let issues = health.join().unwrap_or_default();
+    Suggestions { unused, telemetry, duplicates, cleanup, issues }
 }
 
 fn installed_recently(p: &Package) -> bool {
@@ -1333,5 +1365,14 @@ mod tests {
         let ActionKind::User(cmd) = &steps[1] else { panic!() };
         assert_eq!(cmd[4..], ["--user".to_string(), "app/org.gimp.GIMP/x86_64/stable".into()]);
         assert!(update_selected_action(&[&none]).is_none());
+    }
+
+    #[test]
+    fn snap_running_is_not_an_error() {
+        let mk = |id: &str| { let mut p = pkg(id, id, Source::Snap, Kind::App, "1"); p.new_version = Some("2".into()); p };
+        let (a, b) = (mk("bw"), mk("snap-store"));
+        let script = root_script(&[snap_refresh_script(&[&a, &b])]);
+        if let Ok(out) = std::env::var("PKGTRACK_PRINT_SCRIPT") { std::fs::write(out, &script).unwrap(); }
+        assert!(script.ends_with("done; :; exit $rc") && !script.contains(": || rc=1"));
     }
 }

@@ -77,7 +77,18 @@ pub fn run_privileged(args: &[&str]) -> Result<String> {
     match out.status.code() {
         Some(0) => Ok(log),
         Some(126) | Some(127) => bail!("Authorization was cancelled or denied."),
-        c => bail!("Command failed ({c:?}):\n{}", tail(&log, 15)),
+        c => bail!("{}Command failed ({c:?}):\n{}", hint(&log), tail(&log, 15)),
+    }
+}
+
+/// Plain-language explanation for failures the raw log doesn't make obvious.
+fn hint(log: &str) -> &'static str {
+    if log.contains("dkms") && log.contains("autoinstall") {
+        "A driver (DKMS module, such as NVIDIA or VirtualBox) could not be built for the new kernel, so the \
+         kernel update didn't finish. The kernel you're running now keeps working. Run `sudo dkms status` to \
+         see which driver failed, fix or update it, then run `sudo apt-get -f install` (or try Update again).\n\n"
+    } else {
+        ""
     }
 }
 

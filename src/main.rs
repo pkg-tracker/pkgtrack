@@ -1,6 +1,7 @@
 mod advice;
 mod spinner;
 mod appstream;
+mod health;
 mod history;
 mod network;
 mod sources;
@@ -167,6 +168,16 @@ pub fn main() -> iced::Result {
         let t = std::time::Instant::now();
         let r = advice::scan(all, sources);
         println!("scan took {:?}", t.elapsed());
+        println!("\n== PROBLEMS");
+        for i in &r.issues {
+            println!("[{}] {}\n   {}", i.severity.label(), i.title, i.detail.replace('\n', "\n   "));
+            for it in &i.items {
+                println!("   - {it}");
+            }
+            for a in &i.actions {
+                println!("   fix: {} -> {}", a.label, advice::describe(&a.kind));
+            }
+        }
         println!("\n== TELEMETRY");
         for g in &r.telemetry {
             println!("[{}] {} off={:?} fix={:?}\n   -> {}", g.finding.level.label(), g.finding.title, g.finding.off, g.fix.as_ref().map(|a| advice::describe(&a.kind)), g.advice);
@@ -277,6 +288,7 @@ enum Tab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     All,
+    Problems,
     Unused,
     Telemetry,
     Duplicates,
@@ -1269,7 +1281,7 @@ impl App {
                     let help = match tab {
                         Tab::Installed => "Everything installed: details, updates and uninstall",
                         Tab::Install => "Search for new software and install it",
-                        Tab::Suggestions => "What to clean up, what's duplicated, and trackers to turn off",
+                        Tab::Suggestions => "Problems to fix, what to clean up, what's duplicated, and trackers to turn off",
                         Tab::Network => "Which programs are talking to the internet right now",
                         Tab::Startup => "Services and apps that start automatically",
                         Tab::Sources => "Repositories your software comes from",
@@ -1907,7 +1919,7 @@ impl App {
         let header = row![
             column![
                 text("Suggestions").size(24).font(BOLD),
-                muted("What to clean up, what's duplicated, what's safe to remove, and how to stop tracking.".into()).size(13),
+                muted("Problems to fix, what to clean up, what's duplicated, what's safe to remove, and how to stop tracking.".into()).size(13),
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -1929,6 +1941,7 @@ impl App {
                 let freeable: u64 = s.cleanup.iter().filter_map(|c| c.size).sum();
                 let n_clean: usize = s.cleanup.iter().map(|c| c.items.len()).sum();
                 let n_unused = s.unused.len();
+                let n_problems = s.issues.iter().filter(|i| i.severity != health::Severity::Info).count();
                 let stat = |label: &'static str, value: String, color: Color, sec: Section| {
                     button(stat_card(label, value, color))
                         .padding(0)
@@ -1939,6 +1952,12 @@ impl App {
                 };
                 body = body.push(
                     row![
+                        stat(
+                            "Problems to fix",
+                            n_problems.to_string(),
+                            if s.issues.iter().any(|i| i.severity == health::Severity::Problem) { RED } else if n_problems > 0 { ORANGE } else { GREEN },
+                            Section::Problems
+                        ),
                         stat("Apps you don't use", n_unused.to_string(), if n_unused > 0 { YELLOW } else { GREEN }, Section::Unused),
                         stat("Telemetry to review", active.to_string(), if active > 0 { ORANGE } else { GREEN }, Section::Telemetry),
                         stat("Apps installed twice", s.duplicates.len().to_string(), if s.duplicates.is_empty() { GREEN } else { BLUE }, Section::Duplicates),
@@ -1958,6 +1977,7 @@ impl App {
                 body = body.push(
                     row![
                         chip("All".into(), Section::All).tip("Show every section"),
+                        chip(format!("Problems ({})", s.issues.len()), Section::Problems).tip("Broken installs, drivers, failed services, disk space"),
                         chip(format!("Apps you don't use ({n_unused})"), Section::Unused).tip("Apps not used for over 3 months"),
                         chip(format!("Privacy & telemetry ({})", s.telemetry.len()), Section::Telemetry).tip("Trackers: uninstall or turn off"),
                         chip(format!("Duplicates ({})", s.duplicates.len()), Section::Duplicates).tip("The same app installed from two sources"),
@@ -1967,6 +1987,16 @@ impl App {
                 );
                 let show = |sec: Section| self.section == Section::All || self.section == sec;
 
+                if show(Section::Problems) && (!s.issues.is_empty() || self.section == Section::Problems) {
+                    body = body.push(section_header("PROBLEMS", "Things that break updates or your system, and how to fix them."));
+                    if s.issues.is_empty() {
+                        body = body.push(muted("No problems found.".into()).size(13));
+                    }
+                    for i in &s.issues {
+                        let confirm = i.actions.iter().find_map(|a| self.confirm_box(a));
+                        body = body.push(issue_card(i, self.busy.is_some(), confirm));
+                    }
+                }
                 if show(Section::Unused) && !s.unused.is_empty() {
                     let total: u64 = s.unused.iter().filter_map(|u| u.size).sum();
                     body = body.push(section_header(
@@ -2303,6 +2333,47 @@ fn section_header<'a>(title: &'a str, sub: &'a str) -> Element<'a, Message> {
     column![Space::with_height(6), section_title(title), muted(sub.to_string()).size(12)].spacing(2).into()
 }
 
+fn severity_color(s: health::Severity) -> Color {
+    match s {
+        health::Severity::Problem => RED,
+        health::Severity::Warning => ORANGE,
+        health::Severity::Info => BLUE,
+    }
+}
+
+fn issue_card<'a>(i: &'a health::Issue, busy: bool, confirm: Option<Element<'a, Message>>) -> Element<'a, Message> {
+    let head = row![text(&i.title).size(15).font(BOLD), pill(i.severity.label().into(), severity_color(i.severity))]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    let mut col = Column::new().spacing(6).push(head).push(text(&i.detail).size(12));
+    if !i.items.is_empty() {
+        let mut lines: Vec<&str> = i.items.iter().take(12).map(String::as_str).collect();
+        let more = i.items.len().saturating_sub(12);
+        let tail = format!("… and {more} more");
+        if more > 0 {
+            lines.push(&tail);
+        }
+        col = col.push(muted(lines.join("\n")).size(11).font(Font::MONOSPACE));
+    }
+    if !i.actions.is_empty() {
+        let mut buttons = row![].spacing(8);
+        for (n, a) in i.actions.iter().enumerate() {
+            buttons = buttons.push(
+                button(text(a.label.clone()).size(13))
+                    .padding([7, 14])
+                    .style(if n == 0 { button::primary } else { button::secondary })
+                    .on_press_maybe((!busy && confirm.is_none()).then(|| Message::RunAction(a.clone())))
+                    .tip(advice::describe(&a.kind)),
+            );
+        }
+        col = col.push(buttons);
+    }
+    if let Some(b) = confirm {
+        col = col.push(b);
+    }
+    card(col.into(), Some(severity_color(i.severity)))
+}
+
 fn cleanup_card<'a>(c: &'a advice::Cleanup, busy: bool, confirm: Option<Element<'a, Message>>) -> Element<'a, Message> {
     let mut head = row![text(&c.title).size(15).font(BOLD), pill(c.risk.label().into(), risk_color(c.risk))]
         .spacing(8)
@@ -2631,7 +2702,7 @@ mod tests {
         app.busy = None;
         app.suggestions = Some(advice::Suggestions::default());
         assert!(!app.animating(), "no redraw loop when idle");
-        for sec in [Section::Duplicates, Section::Unused, Section::Cleanup, Section::All] {
+        for sec in [Section::Problems, Section::Duplicates, Section::Unused, Section::Cleanup, Section::All] {
             let _ = app.update(Message::SetSection(sec));
             assert_eq!(app.section, sec);
             let _ = app.view();
