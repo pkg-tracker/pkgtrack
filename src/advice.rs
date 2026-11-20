@@ -531,6 +531,8 @@ pub struct Suggestions {
     pub telemetry: Vec<TelemetryGroup>,
     pub duplicates: Vec<DupGroup>,
     pub cleanup: Vec<Cleanup>,
+    /// System problems (broken installs, drivers, failed services, disk space…).
+    pub issues: Vec<crate::health::Issue>,
 }
 
 /// Names used to spot the same app installed from different sources.
@@ -630,6 +632,11 @@ fn details_parallel(pkgs: &[Package]) -> Vec<Details> {
 }
 
 pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
+    // Health checks only run small read-only commands; do them alongside.
+    let health = {
+        let sources = sources.clone();
+        std::thread::spawn(move || crate::health::check(&sources))
+    };
     let dup_groups = find_duplicates(&all);
     let dup_ids: HashSet<(Source, String)> =
         dup_groups.iter().flatten().map(|p| (p.source, p.id.clone())).collect();
@@ -973,7 +980,8 @@ pub fn scan(all: Vec<Package>, sources: Vec<Source>) -> Suggestions {
     }
 
     more_cleanup(&mut cleanup, &sources);
-    Suggestions { unused, telemetry, duplicates, cleanup }
+    let issues = health.join().unwrap_or_default();
+    Suggestions { unused, telemetry, duplicates, cleanup, issues }
 }
 
 fn installed_recently(p: &Package) -> bool {

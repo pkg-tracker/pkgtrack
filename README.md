@@ -7,7 +7,7 @@ A fast, native Linux desktop app (Rust + [iced](https://iced.rs)) that shows eve
 - **Update** a package when a newer version is available
 - **Used by**: reverse dependencies, Flatpak apps using a runtime, snaps using a base, and **running processes**
 - **Install new software**: one search across every source, with privacy flags, sandbox permissions and a list of extra packages it pulls in, all shown before you install
-- **Suggestions tab**: apps installed twice (and which copy to keep), safe cleanups (unused dependencies, leftover configs, old Snap revisions, data of removed apps), and for each tracker whether to uninstall it or turn it off, with one-click fixes
+- **Suggestions tab**: system problems with one-click fixes (unfinished installs, drivers that fail to build for a new kernel, failed services, low disk space, pending restart), apps installed twice (and which copy to keep), safe cleanups (unused dependencies, leftover configs, old Snap revisions, data of removed apps), and for each tracker whether to uninstall it or turn it off, with one-click fixes
 - **Removal verdict** on every package: Safe to remove / Remove with care / Don't remove, with the reasons
 - **Network**: live outgoing connections per program, with tracking/analytics servers flagged, plus ports open to your network
 - **Startup**: login apps and system/user services with on/off switches and advice on what's safe to turn off
