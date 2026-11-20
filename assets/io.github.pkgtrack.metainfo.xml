@@ -67,6 +67,16 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.3" date="2026-11-20">
+      <description>
+        <ul>
+          <li>Driver build failures say why: a kernel change only a newer driver fixes, a missing compiler, or a compiler older than the kernel's, with a matching fix</li>
+          <li>"Update driver" when a newer version of a failing driver is available</li>
+          <li>Tells you which older kernel to start until a fixed driver is out</li>
+          <li>Warns about kernels that have no headers installed, so drivers aren't built for them, and installs them</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-11-19">
       <description>
         <ul>
