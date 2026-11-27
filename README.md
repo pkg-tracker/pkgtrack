@@ -176,6 +176,8 @@ GitHub Actions builds and tests every push and pull request ([.github/workflows/
 
 If no `v<version>` tag exists yet, the workflow tags the commit and publishes a release with the `.deb`, the `.rpm`, the AppImage, a tarball and `SHA256SUMS`. Pushes that don't change the version are built and tested, but not released.
 
+**Dependency updates are released automatically.** When a push to `main` changes the packages in `Cargo.lock` (after `cargo update`, or to fix a vulnerability) and you didn't raise the version yourself, the workflow raises the micro version (`0.1.5` → `0.1.6`), adds a release entry listing the changed packages to the metainfo, commits that to `main` and publishes the release. The release notes start with the changed packages, and running apps show them in the "A new version is available" popup. `scripts/deps-version.sh bump` does the same locally; `scripts/deps-version.sh changes v0.1.5` lists what changed since a release.
+
 ## Disclaimer
 
 Package Tracker is provided **"as is", without warranty of any kind**, as stated in the [MIT license](LICENSE).

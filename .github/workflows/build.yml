@@ -1,8 +1,13 @@
 # Builds and tests every push and pull request.
-# On a push to main, if the version in Cargo.toml has no release yet,
-# it tags v<version> and publishes a GitHub release with the .deb, the
-# .rpm, the AppImage and a plain binary tarball. Running apps then show the
-# "new version available" popup.
+# On a push to main:
+#  - if Cargo.lock's packages changed since the last release (a dependency
+#    update or a vulnerability fix) and the version wasn't raised by hand, it
+#    raises the micro version (0.1.5 -> 0.1.6) and commits that to main
+#    (scripts/deps-version.sh);
+#  - if the version in Cargo.toml has no release yet, it tags v<version> and
+#    publishes a GitHub release with the .deb, the .rpm, the AppImage and a
+#    plain binary tarball, with the changed dependencies at the top of the
+#    notes. Running apps then show the "new version available" popup.
 name: Build
 
 on:
@@ -23,15 +28,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bump:
+    # Every dependency change must reach users as a new version.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Raise the micro version if dependencies changed
+        id: bump
+        run: |
+          old=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          next=$(scripts/deps-version.sh bump)
+          if [ -n "$next" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q -am "Release $next: dependency updates" \
+              -m "Dependencies changed since v$old:" \
+              -m "$(scripts/deps-version.sh changes "v$old")"
+            # A push with the workflow's own token starts no new run; this run
+            # goes on to build and release the new commit.
+            git push origin HEAD:main
+            echo "Raised the version from $old to $next"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: bump
+    # bump is skipped on pull requests and other branches.
+    if: ${{ !cancelled() && needs.bump.result != 'failure' }}
     # The oldest supported runner gives the widest glibc compatibility.
     runs-on: ubuntu-22.04
+    env:
+      # The commit shown in the About window (the bump's, when there is one).
+      PKGTRACK_SOURCE_SHA: ${{ needs.bump.outputs.sha }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       released: ${{ steps.version.outputs.released }}
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.bump.outputs.sha || github.sha }}
           fetch-depth: 0
 
       - name: Read version
@@ -91,12 +134,31 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.build.outputs.released == 'false'
+    needs: [bump, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.build.outputs.released == 'false' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      SHA: ${{ needs.bump.outputs.sha || github.sha }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+
+      - name: List changed dependencies
+        run: |
+          : > notes.md
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$SHA^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            list=$(scripts/deps-version.sh changes "$prev")
+            if [ -n "$list" ]; then
+              printf '### Updated dependencies (since %s)\n\n%s\n' "$prev" "$list" > notes.md
+            fi
+          fi
+          cat notes.md
+
       - uses: actions/download-artifact@v5
         with:
           name: pkgtrack-${{ needs.build.outputs.version }}
@@ -108,6 +170,7 @@ jobs:
         run: |
           gh release create "v${{ needs.build.outputs.version }}" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$SHA" \
             --title "Package Tracker ${{ needs.build.outputs.version }}" \
+            --notes-file notes.md \
             --generate-notes
