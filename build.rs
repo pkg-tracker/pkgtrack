@@ -14,8 +14,12 @@ fn main() {
         Err(_) => out("date", &["-u", "+%Y-%m-%d"]),
     }
     .unwrap_or_default();
-    let commit = std::env::var("GITHUB_SHA")
+    // CI sets PKGTRACK_SOURCE_SHA when it built a commit other than GITHUB_SHA
+    // (the automatic version bump); GITHUB_* variables can't be overridden.
+    let commit = std::env::var("PKGTRACK_SOURCE_SHA")
         .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
         .map(|s| s.chars().take(7).collect())
         .or_else(|| out("git", &["rev-parse", "--short=7", "HEAD"]))
         .unwrap_or_default();
@@ -27,6 +31,7 @@ fn main() {
     println!("cargo:rustc-env=PKGTRACK_BUILT_BY={by}");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=PKGTRACK_SOURCE_SHA");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
 }
