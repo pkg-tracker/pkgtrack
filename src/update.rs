@@ -115,17 +115,17 @@ pub fn check() -> Result<Option<Release>> {
         return Ok(None);
     }
     let api = format!("https://api.github.com/repos/{}/releases/latest", repo());
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build();
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into();
     let body = match agent
         .get(&api)
-        .set("User-Agent", &format!("pkgtrack/{CURRENT}"))
-        .set("Accept", "application/vnd.github+json")
+        .header("User-Agent", &format!("pkgtrack/{CURRENT}"))
+        .header("Accept", "application/vnd.github+json")
         .call()
     {
-        Ok(r) => r.into_string()?,
+        Ok(mut r) => r.body_mut().read_to_string()?,
         // No release published yet.
-        Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(ureq::Error::Status(code, _)) => bail!("GitHub returned HTTP {code}"),
+        Err(ureq::Error::StatusCode(404)) => return Ok(None),
+        Err(ureq::Error::StatusCode(code)) => bail!("GitHub returned HTTP {code}"),
         Err(e) => return Err(e.into()),
     };
     let rel = parse_release(&body)?;

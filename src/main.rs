@@ -15,7 +15,7 @@ mod telemetry;
 mod update;
 
 use iced::widget::{
-    button, center, checkbox, column, container, horizontal_space, mouse_area, opaque, pick_list, row, scrollable,
+    button, center, checkbox, column, container, space, mouse_area, opaque, pick_list, row, scrollable,
     stack, text, text_input, tooltip, Column, Space,
 };
 use iced::{Alignment, Border, Color, Element, Font, Length, Task, Theme};
@@ -221,7 +221,8 @@ pub fn main() -> iced::Result {
     }
     let icon =
         iced::window::icon::from_rgba(include_bytes!("../assets/icon-64.rgba").to_vec(), 64, 64).ok();
-    iced::application("Package Tracker", App::update, App::view)
+    iced::application(App::new, App::update, App::view)
+        .title("Package Tracker")
         .theme(App::theme)
         .subscription(App::subscription)
         .window(iced::window::Settings {
@@ -235,7 +236,7 @@ pub fn main() -> iced::Result {
             },
             ..Default::default()
         })
-        .run_with(App::new)
+        .run()
 }
 
 /// Headless diagnostics: `pkgtrack --check [package-id...]`
@@ -570,7 +571,7 @@ impl App {
             Task::none()
         };
         // Start maximized (iced 0.13 has no setting for it, so ask once the window exists).
-        let maximize = iced::window::get_oldest().and_then(|id| iced::window::maximize(id, true));
+        let maximize = iced::window::oldest().and_then(|id| iced::window::maximize(id, true));
         (app, Task::batch(tasks.chain([maximize, self_update])))
     }
 
@@ -628,18 +629,18 @@ impl App {
             subs.push(iced::window::frames().map(|_| Message::Tick));
         }
         if self.about {
-            subs.push(iced::keyboard::on_key_press(|key, _| match key {
-                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::CloseAbout),
+            subs.push(iced::keyboard::listen().filter_map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. } => Some(Message::CloseAbout),
                 _ => None,
             }));
         } else if self.popup.is_some() {
-            subs.push(iced::keyboard::on_key_press(|key, _| match key {
-                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::ClosePopup),
+            subs.push(iced::keyboard::listen().filter_map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. } => Some(Message::ClosePopup),
                 _ => None,
             }));
         } else if self.app_update.is_some() {
-            subs.push(iced::keyboard::on_key_press(|key, _| match key {
-                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::CloseAppUpdate),
+            subs.push(iced::keyboard::listen().filter_map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. } => Some(Message::CloseAppUpdate),
                 _ => None,
             }));
         }
@@ -1064,7 +1065,7 @@ impl App {
             Message::Tick => {}
             Message::SetSection(s) => {
                 self.section = s;
-                return scrollable::snap_to(scrollable::Id::new(SUGG_SCROLL), scrollable::RelativeOffset::START);
+                return iced::widget::operation::snap_to(SUGG_SCROLL, iced::widget::operation::RelativeOffset::START);
             }
             Message::OpenUrl(url) => {
                 if url.starts_with("https://") || url.starts_with("http://") {
@@ -1306,7 +1307,7 @@ impl App {
                     .style(|t: &Theme| container::Style {
                         background: Some(t.extended_palette().background.base.color.into()),
                         border: Border { radius: 16.0.into(), width: 1.0, color: t.extended_palette().background.strong.color },
-                        shadow: iced::Shadow { color: Color { a: 0.4, ..Color::BLACK }, offset: iced::Vector::new(0.0, 8.0), blur_radius: 30.0 },
+                        // No shadow: see popup_frame in views.rs.
                         ..Default::default()
                     }),
                 )
@@ -1327,7 +1328,7 @@ impl App {
         let header = row![
             text("Output").size(13).font(BOLD),
             muted(if self.busy.is_some() { "running…".into() } else { format!("{} lines", self.output.len()) }).size(11),
-            iced::widget::horizontal_space(),
+            iced::widget::space::horizontal(),
             button(text("Copy").size(12)).style(button::secondary).padding([3, 10])
                 .on_press_maybe((!self.output.is_empty()).then_some(Message::CopyOutput)).tip("Copy all output, e.g. for a bug report"),
             button(text("Clear").size(12)).style(button::secondary).padding([3, 10])
@@ -1387,7 +1388,7 @@ impl App {
                 .align_y(Alignment::Center),
             )
             .push(muted(format!("{} packages across {} sources", self.packages.len(), self.sources.len())).size(12))
-            .push(Space::with_height(14))
+            .push(Space::new().height(14))
             .push({
                 let t = |label, tab| {
                     let help = match tab {
@@ -1405,13 +1406,13 @@ impl App {
                     row![t("Installed", Tab::Installed), t("Install", Tab::Install)].spacing(4),
                     row![t("Suggestions", Tab::Suggestions), t("Network", Tab::Network)].spacing(4),
                     row![t("Startup", Tab::Startup), t("Sources", Tab::Sources)].spacing(4),
-                    row![t("History", Tab::History), Space::with_width(Length::Fill)].spacing(4),
+                    row![t("History", Tab::History), Space::new().width(Length::Fill)].spacing(4),
                 ]
                 .spacing(4)
             })
-            .push(Space::with_height(14));
+            .push(Space::new().height(14));
         if let Some(side) = self.extra_sidebar() {
-            return self.sidebar_frame(col.push(side).push(Space::with_height(Length::Fill)));
+            return self.sidebar_frame(col.push(side).push(Space::new().height(Length::Fill)));
         }
         if self.tab == Tab::Install {
             return self.search_sidebar(col);
@@ -1419,9 +1420,9 @@ impl App {
         if self.tab == Tab::Suggestions {
             let col = col
                 .push(muted("Suggestions look at your whole system: telemetry you can turn off, apps installed twice, and leftovers that are safe to clean up.".into()).size(12))
-                .push(Space::with_height(10))
+                .push(Space::new().height(10))
                 .push(muted("Every removal shows what it affects and asks before doing anything.".into()).size(12))
-                .push(Space::with_height(Length::Fill));
+                .push(Space::new().height(Length::Fill));
             return self.sidebar_frame(col);
         }
         col = col
@@ -1442,7 +1443,7 @@ impl App {
         let n_apps = self.base_filtered().filter(|p| p.kind == Kind::App).count();
         let checking = !self.checking.is_empty();
         col = col
-            .push(Space::with_height(14))
+            .push(Space::new().height(14))
             .push(section_title("SHOW"))
             .push(nav_item("Everything".into(), String::new(), self.filter == Filter::All, Message::SetFilter(Filter::All)).tip("No filter"))
             .push(nav_item("Desktop apps".into(), n_apps.to_string(), self.filter == Filter::Apps, Message::SetFilter(Filter::Apps)).tip("Only apps that have a launcher in your app menu"))
@@ -1453,14 +1454,14 @@ impl App {
                 Message::SetFilter(Filter::Updates),
             ).tip("Only packages with a newer version available"))
             .push(nav_item("Privacy flagged".into(), n_priv.to_string(), self.filter == Filter::Privacy, Message::SetFilter(Filter::Privacy)).tip("Only packages with known telemetry"))
-            .push(Space::with_height(14))
-            .push(checkbox("Include libraries", self.show_libs).on_toggle(Message::ToggleLibs).size(16).text_size(14).tip("Also list shared libraries (hidden by default; there are thousands)"))
-            .push(Space::with_height(10))
-            .push(checkbox("Daily update notification", self.notify_on).on_toggle(Message::ToggleNotify).size(16).text_size(14).tip("Show a desktop notification once a day when updates are available, even when this app is closed"))
-            .push(Space::with_height(10))
-            .push(checkbox("Check for app updates", self.app_update_check).on_toggle(Message::ToggleAppUpdateCheck).size(16).text_size(14).tip("At startup, ask GitHub whether a newer version of Package Tracker is out (nothing about your computer is sent)"));
+            .push(Space::new().height(14))
+            .push(checkbox(self.show_libs).label("Include libraries").on_toggle(Message::ToggleLibs).size(16).text_size(14).tip("Also list shared libraries (hidden by default; there are thousands)"))
+            .push(Space::new().height(10))
+            .push(checkbox(self.notify_on).label("Daily update notification").on_toggle(Message::ToggleNotify).size(16).text_size(14).tip("Show a desktop notification once a day when updates are available, even when this app is closed"))
+            .push(Space::new().height(10))
+            .push(checkbox(self.app_update_check).label("Check for app updates").on_toggle(Message::ToggleAppUpdateCheck).size(16).text_size(14).tip("At startup, ask GitHub whether a newer version of Package Tracker is out (nothing about your computer is sent)"));
         if let Some(a) = advice::update_all_action(&self.packages).filter(|_| self.checking.is_empty()) {
-            col = col.push(Space::with_height(10)).push(
+            col = col.push(Space::new().height(10)).push(
                 {
                     let help = format!("Install every available update. Runs: {}", advice::describe(&a.kind));
                     button(text(format!("Update all ({n_upd})")).size(14))
@@ -1472,7 +1473,7 @@ impl App {
                 },
             );
         }
-        col = col.push(Space::with_height(Length::Fill));
+        col = col.push(Space::new().height(Length::Fill));
         for (s, e) in &self.errors {
             col = col.push(text(format!("{}: {}", s.short(), e)).size(11).style(text::danger));
         }
@@ -1539,12 +1540,12 @@ impl App {
                 let key: Key = (p.source, p.id.clone());
                 let tick: Element<Message> = if p.new_version.is_some() {
                     let on = self.checked.contains(&key);
-                    checkbox("", on)
+                    checkbox(on)
                         .on_toggle(move |b| Message::ToggleChecked(key.clone(), b))
                         .size(18)
                         .tip(format!("Select {} for bulk update", p.name))
                 } else {
-                    Space::with_width(18).into()
+                    Space::new().width(18).into()
                 };
                 row![container(tick).width(Length::Fixed(26.0)).center_x(Length::Fixed(26.0)), item]
                     .spacing(4)
@@ -1575,7 +1576,7 @@ impl App {
         let mut info = row![muted(format!("{} shown", visible.len())).size(12)].spacing(10).align_y(Alignment::Center);
         if any_updates {
             let free = self.busy.is_none() && self.pending.is_none();
-            info = info.push(horizontal_space()).push(
+            info = info.push(space::horizontal()).push(
                 button(text("Select all updates").size(12))
                     .padding([4, 10])
                     .style(button::secondary)
@@ -1711,7 +1712,7 @@ impl App {
         } else {
             actions = actions.push(container(muted("Checking for updates…".into()).size(13)).padding([9, 0]));
         }
-        actions = actions.push(horizontal_space()).push(
+        actions = actions.push(space::horizontal()).push(
             button(text("Uninstall").size(14))
                 .padding([9, 16])
                 .style(button::danger)
@@ -1836,9 +1837,9 @@ impl App {
             col = col.push(nav_item(s.label().into(), badge, self.search_source == Some(s), Message::SetSearchSource(Some(s))));
         }
         col = col
-            .push(Space::with_height(14))
+            .push(Space::new().height(14))
             .push(muted("Tip: Flatpak and Snap apps run sandboxed. Native packages (deb/rpm/pacman) integrate best with the system.".into()).size(11))
-            .push(Space::with_height(Length::Fill));
+            .push(Space::new().height(Length::Fill));
         for (s, e) in &self.search_errors {
             col = col.push(text(format!("{}: {}", s.short(), e)).size(11).style(text::danger));
         }
@@ -1963,7 +1964,7 @@ impl App {
         let action: Element<Message> = if installed {
             row![
                 pill("Already installed".into(), GREEN),
-                horizontal_space(),
+                space::horizontal(),
                 button(text("Manage in Installed").size(13)).style(button::secondary).on_press(Message::SetTab(Tab::Installed)).tip("Show this package in the Installed tab"),
             ]
             .align_y(Alignment::Center)
@@ -2191,7 +2192,7 @@ impl App {
             .push_status(column![header].spacing(14))
             .push(
                 scrollable(container(body).padding(iced::Padding { right: 14.0, ..Default::default() }))
-                    .id(scrollable::Id::new(SUGG_SCROLL))
+                    .id(SUGG_SCROLL)
                     .height(Length::Fill),
             );
         container(col).padding(22).width(Length::Fill).height(Length::Fill).into()
@@ -2217,7 +2218,7 @@ impl App {
             r = r.push(pill("running".into(), BLUE));
         }
         r = r.push(pill(m.verdict.risk.label().into(), risk_color(m.verdict.risk)));
-        r = r.push(horizontal_space());
+        r = r.push(space::horizontal());
         r = r.push(
             button(text("Details").size(12))
                 .style(button::text)
@@ -2456,7 +2457,7 @@ fn stat_card<'a>(label: &'a str, value: String, color: Color) -> Element<'a, Mes
 }
 
 fn section_header<'a>(title: &'a str, sub: &'a str) -> Element<'a, Message> {
-    column![Space::with_height(6), section_title(title), muted(sub.to_string()).size(12)].spacing(2).into()
+    column![Space::new().height(6), section_title(title), muted(sub.to_string()).size(12)].spacing(2).into()
 }
 
 fn severity_color(s: health::Severity) -> Color {
@@ -2671,7 +2672,7 @@ fn banner<'a>(content: Element<'a, Message>, dismiss: Option<Message>, level: Le
 }
 
 fn nav_item<'a>(label: String, badge: String, active: bool, msg: Message) -> Element<'a, Message> {
-    button(row![text(label).size(14), horizontal_space(), text(badge).size(12)].align_y(Alignment::Center))
+    button(row![text(label).size(14), space::horizontal(), text(badge).size(12)].align_y(Alignment::Center))
         .width(Length::Fill)
         .padding([7, 10])
         .on_press(msg)

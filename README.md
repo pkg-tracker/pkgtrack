@@ -135,7 +135,7 @@ Yes. Package Tracker finds every launcher that starts an AppImage (app menu, aut
 
 ## Build from source
 
-Needs Rust 1.85 or newer ([rustup.rs](https://rustup.rs)).
+Needs Rust 1.90 or newer ([rustup.rs](https://rustup.rs)).
 
 ```sh
 cargo build --release

@@ -8,7 +8,7 @@ use crate::{
     Tip, card, level_color, list_preview, muted, pill, section_header, section_title, short_version, stat_card, App,
     Message, Tab, BLUE, BOLD, GREEN, ORANGE, RED, SLATE, YELLOW,
 };
-use iced::widget::{button, checkbox, column, container, horizontal_space, row, scrollable, text, text_input, toggler, Column, Space};
+use iced::widget::{button, checkbox, column, container, space, row, scrollable, text, text_input, toggler, Column, Space};
 use iced::{Alignment, Element, Font, Length};
 
 fn page<'a>(app: &'a App, title: &'a str, subtitle: &'a str, right: Option<Element<'a, Message>>, body: Column<'a, Message>) -> Element<'a, Message> {
@@ -31,15 +31,15 @@ impl App {
     pub(crate) fn extra_sidebar(&self) -> Option<Element<'_, Message>> {
         let col: Column<Message> = match self.tab {
             Tab::Network => column![
-                checkbox("Refresh every 3 seconds", self.net_auto).on_toggle(Message::SetNetAuto).size(16).text_size(14).tip("Update the list automatically while this tab is open"),
-                checkbox("Only flagged connections", self.net_flagged).on_toggle(Message::SetNetFlagged).size(16).text_size(14).tip("Hide everything except connections to tracking, analytics and crash-report servers"),
-                Space::with_height(10),
+                checkbox(self.net_auto).label("Refresh every 3 seconds").on_toggle(Message::SetNetAuto).size(16).text_size(14).tip("Update the list automatically while this tab is open"),
+                checkbox(self.net_flagged).label("Only flagged connections").on_toggle(Message::SetNetFlagged).size(16).text_size(14).tip("Hide everything except connections to tracking, analytics and crash-report servers"),
+                Space::new().height(10),
                 muted("Shows which programs are talking to the internet right now. Names come from reverse DNS, so big services may show their cloud provider (e.g. 1e100.net = Google).".into()).size(12),
                 muted("Connections of system services appear without a program name unless you run the app as root.".into()).size(12),
             ],
             Tab::Startup => column![
-                checkbox("Only show suggestions", self.startup_hints_only).on_toggle(Message::SetStartupHints).size(16).text_size(14).tip("Hide items marked 'Keep on' and unknown ones"),
-                Space::with_height(10),
+                checkbox(self.startup_hints_only).label("Only show suggestions").on_toggle(Message::SetStartupHints).size(16).text_size(14).tip("Hide items marked 'Keep on' and unknown ones"),
+                Space::new().height(10),
                 muted("Services and apps that start by themselves. Turning off what you don't need saves memory, speeds up boot and stops some background reporting.".into()).size(12),
                 muted("Login apps are changed for your user only. System services ask for your password.".into()).size(12),
             ],
@@ -49,7 +49,7 @@ impl App {
             ],
             Tab::History => column![
                 text_input("Filter by package or command…", &self.history_query).on_input(Message::HistoryQuery).padding(8).size(13),
-                Space::with_height(10),
+                Space::new().height(10),
                 section_title("MOVE TO A NEW PC"),
                 button(text("Export app list…").size(13)).width(Length::Fill).style(button::secondary).on_press_maybe(self.loading.is_empty().then_some(Message::Export)).tip("Save the apps you installed to a text file, to reinstall them on another computer"),
                 button(text("Import app list…").size(13)).width(Length::Fill).style(button::secondary).on_press_maybe(self.loading.is_empty().then_some(Message::ImportPick)).tip("Pick an exported app list and install whatever is missing on this computer"),
@@ -111,7 +111,7 @@ impl App {
             {
                 head = head.push(pill(format!("known telemetry: {}", l.label()), level_color(l)));
             }
-            head = head.push(horizontal_space()).push(muted(format!("{} connection(s)", conns.len())).size(12));
+            head = head.push(space::horizontal()).push(muted(format!("{} connection(s)", conns.len())).size(12));
             let mut c = Column::new().spacing(4).push(head);
             if !p.exe.is_empty() {
                 c = c.push(muted(p.exe.clone()).size(11).font(Font::MONOSPACE));
@@ -127,7 +127,7 @@ impl App {
                 .align_y(Alignment::Center);
                 r = r.push(match &conn.flag {
                     Some((label, level)) => container(pill(label.clone(), level_color(*level))).width(Length::FillPortion(3)),
-                    None => container(Space::with_width(0)).width(Length::FillPortion(3)),
+                    None => container(Space::new().width(0)).width(Length::FillPortion(3)),
                 });
                 c = c.push(r);
             }
@@ -274,7 +274,7 @@ impl App {
             if !repo.enabled {
                 head = head.push(pill("disabled".into(), SLATE));
             }
-            head = head.push(horizontal_space());
+            head = head.push(space::horizontal());
             let mut confirm = None;
             if let Some((disable, enable)) = &repo.toggle {
                 let a = if repo.enabled { disable } else { enable };
@@ -368,7 +368,7 @@ impl App {
             if !e.by.is_empty() {
                 head = head.push(muted(format!("by {}", e.by)).size(11));
             }
-            head = head.push(horizontal_space()).push(muted(summary).size(12));
+            head = head.push(space::horizontal()).push(muted(summary).size(12));
             if !e.changes.is_empty() {
                 head = head.push(button(text(if open { "Hide" } else { "Show" }).size(12)).style(button::text).on_press(Message::ToggleEntry(*i)).tip(if open { "Hide the package list" } else { "Show every package changed in this step" }));
             }
@@ -427,7 +427,7 @@ impl App {
         let mut c = Column::new().spacing(6).push(
             row![
                 text(format!("Import from {}", plan.file.rsplit('/').next().unwrap_or(""))).size(15).font(BOLD),
-                horizontal_space(),
+                space::horizontal(),
                 button(text("Close").size(12)).style(button::text).on_press(Message::ClearImport).tip("Close this import summary"),
             ]
             .align_y(Alignment::Center),
@@ -697,7 +697,10 @@ fn popup_frame(content: Element<'_, Message>) -> Element<'_, Message> {
             iced::widget::container::Style {
                 background: Some(pal.background.base.color.into()),
                 border: iced::Border { radius: 14.0.into(), width: 1.0, color: pal.background.strong.color },
-                shadow: iced::Shadow { color: iced::Color { a: 0.4, ..iced::Color::BLACK }, offset: iced::Vector::new(0.0, 8.0), blur_radius: 30.0 },
+                // No shadow. iced 0.14's software renderer (used without a working
+                // GPU) paints shadows without clipping on partial redraws, so while a
+                // spinner animates on or under the popup the shadow piles up over it
+                // every frame until the popup turns black.
                 ..Default::default()
             }
         })
@@ -745,7 +748,7 @@ impl App {
                         .style(button::secondary)
                         .on_press(Message::OpenUrl("https://github.com/pkg-tracker/pkgtrack#disclaimer".into()))
                         .tip("Open the disclaimer on GitHub"),
-                    horizontal_space(),
+                    space::horizontal(),
                     button(text("I understand").size(14))
                         .padding([9, 16])
                         .style(button::primary)
@@ -815,7 +818,7 @@ impl App {
                         .on_press(Message::OpenUrl(repo.clone())).tip("Open the project page on GitHub"),
                     button(text("Report a problem").size(14)).padding([9, 16]).style(button::secondary)
                         .on_press(Message::OpenUrl(format!("{repo}/issues"))).tip("Open GitHub issues"),
-                    horizontal_space(),
+                    space::horizontal(),
                     button(text("Close").size(14)).padding([9, 16]).style(button::primary)
                         .on_press(Message::CloseAbout).tip("Close (Esc)"),
                 ]
@@ -847,7 +850,7 @@ impl App {
             .style(button::text)
             .on_press(Message::SkipAppUpdate)
             .tip("Don't remind me about this version again");
-        col = col.push(row![download, later, horizontal_space(), skip].spacing(10).align_y(Alignment::Center));
+        col = col.push(row![download, later, space::horizontal(), skip].spacing(10).align_y(Alignment::Center));
         popup_frame(col.into())
     }
 }
