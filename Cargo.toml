@@ -2,7 +2,7 @@
 name = "pkgtrack"
 version = "0.1.5"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 description = "See, update, install and remove Linux packages and check them for telemetry"
 license = "MIT"
 repository = "https://github.com/pkg-tracker/pkgtrack"
@@ -12,10 +12,18 @@ categories = ["gui", "os::linux-apis"]
 
 [dependencies]
 anyhow = "1"
-iced = { version = "0.13.1", features = ["tokio", "advanced", "image", "svg", "canvas"] }
+# iced's defaults minus linux-theme-detection: the app picks its own theme,
+# and that feature pulls in zbus (zvariant and zbus_names are unmaintained).
+iced = { version = "0.14.0", default-features = false, features = [
+    "wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "x11", "wayland",
+    "tokio", "advanced", "image-without-codecs", "svg", "canvas",
+] }
+# Decoders for app icons only. iced's "image" feature enables every codec,
+# including the AVIF encoder rav1e (which pulls in the unmaintained paste).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "process"] }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]
 lto = "thin"
